@@ -31,15 +31,11 @@ class MainActivity : AppCompatActivity() {
             Shizuku.requestPermission(0)
         }
 
-        // --- FIX: Get the current Display ID (Cover Screen) ---
         val currentDisplayId = display?.displayId ?: android.view.Display.DEFAULT_DISPLAY
-
-        // Pass it to the service
         val intent = Intent(this, FloatingLauncherService::class.java).apply {
             putExtra("DISPLAY_ID", currentDisplayId)
         }
         
-        // Android 8.0+ requires foreground service start
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {

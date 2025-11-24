@@ -9,12 +9,20 @@ class ShellUserService : IShellService.Stub() {
 
     override fun forceStop(packageName: String) {
         try {
-            Log.i(TAG, "Killing: $packageName")
-            // Executes in Shizuku's shell (u:r:shell:s0)
             val process = Runtime.getRuntime().exec("am force-stop $packageName")
             process.waitFor()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to kill", e)
+        }
+    }
+
+    override fun runCommand(command: String) {
+        try {
+            Log.i(TAG, "Running: $command")
+            val process = Runtime.getRuntime().exec(command)
+            process.waitFor()
+        } catch (e: Exception) {
+            Log.e(TAG, "Command failed: $command", e)
         }
     }
 }
