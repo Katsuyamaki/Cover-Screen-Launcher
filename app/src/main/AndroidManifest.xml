@@ -4,6 +4,11 @@
 
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="rikka.shizuku.ui" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -19,8 +24,7 @@
             android:authorities="${applicationId}.shizuku"
             android:enabled="true"
             android:exported="true"
-            android:multiprocess="false"
-            android:permission="android.permission.MANAGE_DOCUMENTS" />
+            android:multiprocess="false" />
 
         <activity
             android:name=".MenuActivity"
@@ -29,48 +33,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
-            <layout
-                android:defaultHeight="400dp"
-                android:defaultWidth="500dp"
-                android:gravity="center" />
+            <layout android:defaultHeight="400dp" android:defaultWidth="500dp" android:gravity="center" />
         </activity>
 
-        <activity
-            android:name=".QuadrantActivity"
-            android:exported="false">
-            <layout
-                android:defaultHeight="600dp"
-                android:defaultWidth="500dp"
-                android:gravity="center" />
-        </activity>
-
-        <activity
-            android:name=".SplitActivity"
-            android:exported="false">
-            <layout
-                android:defaultHeight="500dp"
-                android:defaultWidth="500dp"
-                android:gravity="center" />
-        </activity>
-
-        <activity
-            android:name=".TriSplitActivity"
-            android:exported="false">
-            <layout
-                android:defaultHeight="500dp"
-                android:defaultWidth="500dp"
-                android:gravity="center" />
-        </activity>
-
-        <activity
-            android:name=".MainActivity"
-            android:exported="false">
-            <layout
-                android:defaultHeight="700dp"
-                android:defaultWidth="500dp"
-                android:gravity="center" />
-        </activity>
+        <activity android:name=".QuadrantActivity" android:exported="false" />
+        <activity android:name=".SplitActivity" android:exported="false" />
+        <activity android:name=".TriSplitActivity" android:exported="false" />
+        <activity android:name=".MainActivity" android:exported="false" />
 
     </application>
 </manifest>

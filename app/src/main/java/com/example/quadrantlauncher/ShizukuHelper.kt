@@ -4,34 +4,27 @@ import android.content.pm.PackageManager
 import android.util.Log
 import rikka.shizuku.Shizuku
 import java.lang.reflect.Method
+import java.io.BufferedReader
+import java.io.InputStreamReader
 
 object ShizukuHelper {
 
     private const val TAG = "ShizukuHelper"
     const val SHIZUKU_PERMISSION_REQUEST_CODE = 1001
 
-    // -----------------------------------------------------------------------
-    // Correct Shizuku.newProcess() reflection method for API 13.1.5
-    //
-    // newProcess(String[] argv, String[] envp, String cwd, int uid, int gid)
-    // -----------------------------------------------------------------------
+    // Reflection to get the newProcess method that works for "User" (ADB)
     private val newProcessMethod: Method by lazy {
         val clazz = Class.forName("rikka.shizuku.Shizuku")
         val method = clazz.getDeclaredMethod(
             "newProcess",
-            Array<String>::class.java,   // argv
-            Array<String>::class.java,   // envp
-            String::class.java,          // cwd
-            Int::class.java,             // uid
-            Int::class.java              // gid
+            Array<String>::class.java,   // command array
+            Array<String>::class.java,   // environment
+            String::class.java           // directory
         )
         method.isAccessible = true
         method
     }
 
-    // -----------------------------------------------------------------------
-    // Shizuku availability & permission
-    // -----------------------------------------------------------------------
     fun isShizukuAvailable(): Boolean {
         return try {
             Shizuku.pingBinder()
@@ -45,53 +38,48 @@ object ShizukuHelper {
         return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
     }
 
-    // Shizuku 13+ permission request (no Activity parameter)
     fun requestPermission() {
-        if (Shizuku.shouldShowRequestPermissionRationale()) {
-            Log.w(TAG, "Shizuku: shouldShowRequestPermissionRationale() = true")
-        }
         Shizuku.requestPermission(SHIZUKU_PERMISSION_REQUEST_CODE)
     }
 
-    // -----------------------------------------------------------------------
-    // Force-stop an app using Shizuku
-    // -----------------------------------------------------------------------
     fun killApp(packageName: String) {
         if (!hasPermission()) {
-            Log.w(TAG, "killApp: Shizuku permission not granted")
+            Log.e(TAG, "killApp: Permission denied")
             return
         }
 
         try {
-            val command = arrayOf("sh", "-c", "am force-stop $packageName")
-            Log.i(TAG, "Executing kill: ${command.joinToString(" ")}")
+            // THE FIX:
+            // 1. We use /system/bin/sh to ensure we have a shell.
+            // 2. We use /system/bin/am to ensure we find the 'am' command.
+            // 3. We do NOT use 'adb shell'.
+            
+            val fullCommand = "/system/bin/am force-stop "
+            val argv = arrayOf("/system/bin/sh", "-c", fullCommand)
 
-            // Run as root in Shizuku
+            Log.i(TAG, "Requesting kill: ")
+
             val process = newProcessMethod.invoke(
                 null,
-                command,     // argv
-                null,        // envp
-                null,        // cwd
-                0,           // uid = root
-                0            // gid = root
+                argv,        // The command: sh -c "am force-stop pkg"
+                null,        // Env
+                null         // Dir
             ) as Process
-
-            // Capture stdout and stderr for debugging
-            val stdout = process.inputStream.bufferedReader().readText()
-            val stderr = process.errorStream.bufferedReader().readText()
 
             val exitCode = process.waitFor()
 
-            Log.i(TAG, "killApp stdout: $stdout")
-            Log.e(TAG, "killApp stderr: $stderr")
-            Log.i(TAG, "killApp exitCode = $exitCode")
+            // READ THE OUTPUT (Critical for debugging)
+            val stdOut = BufferedReader(InputStreamReader(process.inputStream)).readText()
+            val stdErr = BufferedReader(InputStreamReader(process.errorStream)).readText()
 
-            if (exitCode != 0) {
-                Log.e(TAG, "Error: am force-stop failed (exit=$exitCode)")
+            if (exitCode == 0) {
+                Log.i(TAG, "Kill Success (). Output: ")
+            } else {
+                Log.e(TAG, "Kill FAILED (). Error: ")
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "killApp exception for $packageName", e)
+            Log.e(TAG, "killApp CRASHED", e)
         }
     }
 }

@@ -15,7 +15,6 @@ import rikka.shizuku.Shizuku
 
 class TriSplitActivity : AppCompatActivity() {
 
-    // Preference keys
     companion object {
         const val TRI1_KEY = "TRI1_PACKAGE"
         const val TRI2_KEY = "TRI2_PACKAGE"
@@ -38,12 +37,7 @@ class TriSplitActivity : AppCompatActivity() {
         Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             if (requestCode == ShizukuHelper.SHIZUKU_PERMISSION_REQUEST_CODE) {
                 hasShizukuPermission = grantResult == PackageManager.PERMISSION_GRANTED
-                Toast.makeText(
-                    this,
-                    if (hasShizukuPermission) "Shizuku permission granted"
-                    else "Shizuku permission denied",
-                    Toast.LENGTH_SHORT
-                ).show()
+                checkShizukuPermission()
             }
         }
 
@@ -85,7 +79,6 @@ class TriSplitActivity : AppCompatActivity() {
         app3Button = findViewById(R.id.app3_button_tri)
         launchButton = findViewById(R.id.launch_button_tri_split)
 
-        // Load saved preferences
         loadSavedApps()
 
         app1Button.setOnClickListener { currentApp = 1; pickApp() }
@@ -105,10 +98,8 @@ class TriSplitActivity : AppCompatActivity() {
     private fun loadSavedApps() {
         app1Package = AppPreferences.loadPackage(this, TRI1_KEY)
         app1Button.text = "App 1: ${AppPreferences.getSimpleName(app1Package)}"
-
         app2Package = AppPreferences.loadPackage(this, TRI2_KEY)
         app2Button.text = "App 2: ${AppPreferences.getSimpleName(app2Package)}"
-
         app3Package = AppPreferences.loadPackage(this, TRI3_KEY)
         app3Button.text = "App 3: ${AppPreferences.getSimpleName(app3Package)}"
     }
@@ -125,8 +116,6 @@ class TriSplitActivity : AppCompatActivity() {
             } else {
                 ShizukuHelper.requestPermission()
             }
-        } else {
-            Toast.makeText(this, "Shizuku not running", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -144,23 +133,31 @@ class TriSplitActivity : AppCompatActivity() {
         val middle = Rect(colWidth, 0, colWidth * 2, h)
         val right = Rect(colWidth * 2, 0, w, h)
 
-        launchApp(app1Package!!, left)
-        launchApp(app2Package!!, middle)
-        launchApp(app3Package!!, right)
+        if (hasShizukuPermission) {
+            Thread {
+                ShizukuHelper.killApp(app1Package!!)
+                ShizukuHelper.killApp(app2Package!!)
+                ShizukuHelper.killApp(app3Package!!)
+                try { Thread.sleep(400) } catch (e: InterruptedException) {}
+                runOnUiThread {
+                    launchAppIntent(app1Package!!, left)
+                    launchAppIntent(app2Package!!, middle)
+                    launchAppIntent(app3Package!!, right)
+                }
+            }.start()
+        } else {
+            launchAppIntent(app1Package!!, left)
+            launchAppIntent(app2Package!!, middle)
+            launchAppIntent(app3Package!!, right)
+        }
     }
 
-    private fun launchApp(packageName: String, bounds: Rect) {
-        if (hasShizukuPermission) {
-            ShizukuHelper.killApp(packageName)
-            // Add delay to ensure app is killed before restart
-            try { Thread.sleep(100) } catch (e: InterruptedException) {}
-        }
-
+    private fun launchAppIntent(packageName: String, bounds: Rect) {
         try {
             val intent = packageManager.getLaunchIntentForPackage(packageName)
             if (intent == null) return
 
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             val options = ActivityOptions.makeBasic().setLaunchBounds(bounds)
             startActivity(intent, options.toBundle())
         } catch (e: Exception) {

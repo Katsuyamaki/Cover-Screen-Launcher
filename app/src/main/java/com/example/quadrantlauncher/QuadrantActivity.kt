@@ -15,7 +15,6 @@ import rikka.shizuku.Shizuku
 
 class QuadrantActivity : AppCompatActivity() {
 
-    // Preference keys
     companion object {
         const val Q1_KEY = "Q1_PACKAGE"
         const val Q2_KEY = "Q2_PACKAGE"
@@ -41,12 +40,7 @@ class QuadrantActivity : AppCompatActivity() {
         Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             if (requestCode == ShizukuHelper.SHIZUKU_PERMISSION_REQUEST_CODE) {
                 hasShizukuPermission = grantResult == PackageManager.PERMISSION_GRANTED
-                Toast.makeText(
-                    this,
-                    if (hasShizukuPermission) "Shizuku permission granted"
-                    else "Shizuku permission denied",
-                    Toast.LENGTH_SHORT
-                ).show()
+                checkShizukuPermission() // Update status
             }
         }
 
@@ -94,7 +88,6 @@ class QuadrantActivity : AppCompatActivity() {
         q4Button = findViewById(R.id.q4_button)
         launchButton = findViewById(R.id.launch_button)
 
-        // Load saved preferences
         loadSavedApps()
 
         q1Button.setOnClickListener { currentQuadrant = 1; launchAppPicker() }
@@ -116,13 +109,10 @@ class QuadrantActivity : AppCompatActivity() {
     private fun loadSavedApps() {
         q1Package = AppPreferences.loadPackage(this, Q1_KEY)
         q1Button.text = "Q1: ${AppPreferences.getSimpleName(q1Package)}"
-
         q2Package = AppPreferences.loadPackage(this, Q2_KEY)
         q2Button.text = "Q2: ${AppPreferences.getSimpleName(q2Package)}"
-
         q3Package = AppPreferences.loadPackage(this, Q3_KEY)
         q3Button.text = "Q3: ${AppPreferences.getSimpleName(q3Package)}"
-
         q4Package = AppPreferences.loadPackage(this, Q4_KEY)
         q4Button.text = "Q4: ${AppPreferences.getSimpleName(q4Package)}"
     }
@@ -139,8 +129,6 @@ class QuadrantActivity : AppCompatActivity() {
             } else {
                 ShizukuHelper.requestPermission()
             }
-        } else {
-            Toast.makeText(this, "Shizuku not running", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -158,24 +146,43 @@ class QuadrantActivity : AppCompatActivity() {
         val q3 = Rect(0, h / 2, w / 2, h)
         val q4 = Rect(w / 2, h / 2, w, h)
 
-        launchApp(q1Package!!, q1)
-        launchApp(q2Package!!, q2)
-        launchApp(q3Package!!, q3)
-        launchApp(q4Package!!, q4)
+        // Kill all first (Synchronously wait for shell command)
+        if (hasShizukuPermission) {
+            // Launch in background thread to avoid freezing UI if kill takes time
+            Thread {
+                ShizukuHelper.killApp(q1Package!!)
+                ShizukuHelper.killApp(q2Package!!)
+                ShizukuHelper.killApp(q3Package!!)
+                ShizukuHelper.killApp(q4Package!!)
+                
+                // IMPORTANT: Wait for OS to clean up windows
+                try { Thread.sleep(400) } catch (e: InterruptedException) {}
+
+                // Back to UI thread to launch
+                runOnUiThread {
+                    launchAppIntent(q1Package!!, q1)
+                    launchAppIntent(q2Package!!, q2)
+                    launchAppIntent(q3Package!!, q3)
+                    launchAppIntent(q4Package!!, q4)
+                }
+            }.start()
+        } else {
+            // Fallback (wont work well for moving windows)
+            launchAppIntent(q1Package!!, q1)
+            launchAppIntent(q2Package!!, q2)
+            launchAppIntent(q3Package!!, q3)
+            launchAppIntent(q4Package!!, q4)
+        }
     }
 
-    private fun launchApp(packageName: String, bounds: Rect) {
-        if (hasShizukuPermission) {
-            ShizukuHelper.killApp(packageName)
-            // Add delay to ensure app is killed before restart
-            try { Thread.sleep(100) } catch (e: InterruptedException) {}
-        }
-
+    private fun launchAppIntent(packageName: String, bounds: Rect) {
         try {
             val intent = packageManager.getLaunchIntentForPackage(packageName)
             if (intent == null) return
 
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // CLEAR_TOP helps reset the task state
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            
             val options = ActivityOptions.makeBasic().setLaunchBounds(bounds)
             startActivity(intent, options.toBundle())
         } catch (e: Exception) {
