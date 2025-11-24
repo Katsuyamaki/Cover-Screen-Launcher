@@ -3,6 +3,9 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <queries>
         <package android:name="moe.shizuku.privileged.api" />
@@ -27,19 +30,23 @@
             android:multiprocess="false" />
 
         <activity
-            android:name=".MenuActivity"
+            android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <layout android:defaultHeight="400dp" android:defaultWidth="500dp" android:gravity="center" />
         </activity>
 
-        <activity android:name=".QuadrantActivity" android:exported="false" />
+        <service 
+            android:name=".FloatingLauncherService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="overlay_launcher"/>
+        </service>
+
         <activity android:name=".SplitActivity" android:exported="false" />
-        <activity android:name=".TriSplitActivity" android:exported="false" />
-        <activity android:name=".MainActivity" android:exported="false" />
 
     </application>
 </manifest>
