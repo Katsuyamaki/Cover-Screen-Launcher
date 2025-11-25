@@ -13,7 +13,9 @@ import android.graphics.Rect
 import android.graphics.Color
 import android.net.Uri
 import android.hardware.display.DisplayManager
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
 import android.util.Log
@@ -58,11 +60,11 @@ class FloatingLauncherService : Service() {
     private var resetTrackpad = false
     private var isExtinguished = false
     
-    // TODO: UPDATE THIS TO THE REAL PACKAGE NAME OF YOUR TRACKPAD APP
     private val TRACKPAD_PACKAGE = "com.katsuyamaki.trackpad"
     
     private var shellService: IShellService? = null
     private var isBound = false
+    private val uiHandler = Handler(Looper.getMainLooper())
 
     companion object {
         const val MODE_SEARCH = 0
@@ -111,7 +113,7 @@ class FloatingLauncherService : Service() {
                      return
                 }
                 AppPreferences.deleteProfile(this@FloatingLauncherService, item.name)
-                Toast.makeText(this@FloatingLauncherService, "Deleted ${item.name}", Toast.LENGTH_SHORT).show()
+                showToast("Deleted ${item.name}")
                 switchMode(MODE_PROFILES)
                 return
             }
@@ -129,10 +131,13 @@ class FloatingLauncherService : Service() {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             shellService = IShellService.Stub.asInterface(binder)
             isBound = true
+            updateExecuteButtonColor(true)
+            showToast("Shizuku Connected")
         }
         override fun onServiceDisconnected(name: ComponentName?) {
             shellService = null
             isBound = false
+            updateExecuteButtonColor(false)
         }
     }
 
@@ -176,6 +181,10 @@ class FloatingLauncherService : Service() {
             currentDpiSetting = AppPreferences.getLastDpi(this)
             updateGlobalFontSize()
             updateBubbleIcon()
+            
+            if (shellService == null && Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                bindShizuku()
+            }
         } catch (e: Exception) {
             stopSelf()
         }
@@ -192,6 +201,11 @@ class FloatingLauncherService : Service() {
         currentDisplayId = displayId
         displayContext = createDisplayContext(display)
         windowManager = displayContext!!.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    }
+
+    private fun refreshDisplayId() {
+        val id = displayContext?.display?.displayId ?: Display.DEFAULT_DISPLAY
+        currentDisplayId = id
     }
 
     private fun startForegroundService() {
@@ -216,7 +230,20 @@ class FloatingLauncherService : Service() {
         try {
             val component = ComponentName(packageName, ShellUserService::class.java.name)
             ShizukuBinder.bind(component, userServiceConnection, true, 1)
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Bind Shizuku Failed", e)
+        }
+    }
+
+    private fun updateExecuteButtonColor(isReady: Boolean) {
+        uiHandler.post {
+            val executeBtn = drawerView?.findViewById<ImageView>(R.id.icon_execute)
+            if (isReady) {
+                executeBtn?.setColorFilter(Color.GREEN)
+            } else {
+                executeBtn?.setColorFilter(Color.RED)
+            }
+        }
     }
 
     private fun setupBubble() {
@@ -270,7 +297,6 @@ class FloatingLauncherService : Service() {
         try {
             val uriStr = AppPreferences.getIconUri(this)
             val iconView = bubbleView?.findViewById<ImageView>(R.id.bubble_icon)
-            
             if (uriStr != null) {
                 val uri = Uri.parse(uriStr)
                 var input = contentResolver.openInputStream(uri)
@@ -330,14 +356,17 @@ class FloatingLauncherService : Service() {
         
         val searchBar = drawerView!!.findViewById<EditText>(R.id.rofi_search_bar)
         val recycler = drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view)
+        val executeBtn = drawerView!!.findViewById<ImageView>(R.id.icon_execute)
         
+        if (isBound) executeBtn.setColorFilter(Color.GREEN) else executeBtn.setColorFilter(Color.RED)
+
         drawerView!!.findViewById<ImageView>(R.id.icon_search_mode).setOnClickListener { switchMode(MODE_SEARCH) }
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_window).setOnClickListener { switchMode(MODE_LAYOUTS) }
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_resolution).setOnClickListener { switchMode(MODE_RESOLUTION) }
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_dpi).setOnClickListener { switchMode(MODE_DPI) }
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_profiles).setOnClickListener { switchMode(MODE_PROFILES) }
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_settings).setOnClickListener { switchMode(MODE_SETTINGS) }
-        drawerView!!.findViewById<ImageView>(R.id.icon_execute).setOnClickListener { executeLaunch(selectedLayoutType) }
+        executeBtn.setOnClickListener { executeLaunch(selectedLayoutType) }
         
         searchBar.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) { filterList(s.toString()) }
@@ -385,7 +414,6 @@ class FloatingLauncherService : Service() {
         }
     }
 
-    // --- EXTINGUISH LOGIC ---
     private fun performExtinguish() {
         toggleDrawer()
         isExtinguished = true
@@ -397,7 +425,7 @@ class FloatingLauncherService : Service() {
                 e.printStackTrace()
             }
         }.start()
-        Toast.makeText(this, "Screen OFF (Index $targetDisplayIndex). Vol+ to Wake.", Toast.LENGTH_SHORT).show()
+        showToast("Screen OFF (Index ${targetDisplayIndex}). Vol+ to Wake.")
     }
 
     private fun wakeUp() {
@@ -406,15 +434,12 @@ class FloatingLauncherService : Service() {
             shellService?.setScreenOff(0, false) 
             shellService?.setScreenOff(1, false)
         }.start()
-        Toast.makeText(this, "Screen Woke Up", Toast.LENGTH_SHORT).show()
+        showToast("Screen Woke Up")
     }
 
-    // --- TRACKPAD LOGIC ---
     private fun restartTrackpad() {
         try {
-            // 1. Kill
             shellService?.forceStop(TRACKPAD_PACKAGE)
-            // 2. Start (Launch Intent)
             val i = packageManager.getLaunchIntentForPackage(TRACKPAD_PACKAGE)
             if (i != null) {
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -424,8 +449,6 @@ class FloatingLauncherService : Service() {
             Log.e(TAG, "Failed to reset trackpad", e)
         }
     }
-
-    // --- OTHER LOGIC ---
 
     private fun loadInstalledApps() {
         val pm = packageManager
@@ -506,14 +529,12 @@ class FloatingLauncherService : Service() {
                 displayList.add(FontSizeOption(currentFontSize))
                 displayList.add(IconOption("Launcher Icon (Tap to Change)"))
                 
-                // Settings Toggles
                 displayList.add(ToggleOption("Disable App Kill (Faster)", disableAppKill) { 
                     disableAppKill = it
                     AppPreferences.setDisableKill(this, it)
                 })
                 
                 val targetText = if (targetDisplayIndex == 1) "Target: Cover Screen (1)" else "Target: Main Screen (0)"
-                // IMPORTANT: The 'ToggleOption' here also serves as the row for the power button
                 displayList.add(ToggleOption(targetText, targetDisplayIndex == 1) { 
                     targetDisplayIndex = if (it) 1 else 0
                     AppPreferences.setTargetDisplayIndex(this, targetDisplayIndex)
@@ -599,19 +620,19 @@ class FloatingLauncherService : Service() {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
         } catch (e: Exception) {
-            Toast.makeText(this, "Cannot start picker: ${e.message}", Toast.LENGTH_SHORT).show()
+            showToast("Error: ${e.message}")
         }
     }
 
     private fun saveProfile() {
         val name = drawerView?.findViewById<EditText>(R.id.rofi_search_bar)?.text?.toString()?.trim()
         if (name.isNullOrEmpty()) {
-            Toast.makeText(this, "Enter a profile name in the search bar", Toast.LENGTH_SHORT).show()
+            showToast("Enter Name")
             return
         }
         val pkgs = selectedAppsQueue.map { it.packageName }
         AppPreferences.saveProfile(this, name, selectedLayoutType, selectedResolutionIndex, currentDpiSetting, pkgs)
-        Toast.makeText(this, "Saved Profile: $name", Toast.LENGTH_SHORT).show()
+        showToast("Saved: ${name}")
         drawerView?.findViewById<EditText>(R.id.rofi_search_bar)?.setText("")
         switchMode(MODE_PROFILES)
     }
@@ -637,7 +658,7 @@ class FloatingLauncherService : Service() {
             AppPreferences.saveLastResolution(this, selectedResolutionIndex)
             AppPreferences.saveLastDpi(this, currentDpiSetting)
             
-            Toast.makeText(this, "Loaded Profile: $name", Toast.LENGTH_SHORT).show()
+            showToast("Loaded: ${name}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load profile", e)
         }
@@ -663,6 +684,7 @@ class FloatingLauncherService : Service() {
 
     private fun executeLaunch(layoutType: Int) {
         toggleDrawer() 
+        refreshDisplayId() 
         
         val targetDim = getTargetDimensions(selectedResolutionIndex)
         val w = targetDim?.first ?: windowManager.maximumWindowMetrics.bounds.width()
@@ -723,34 +745,74 @@ class FloatingLauncherService : Service() {
                     
                     val count = Math.min(selectedAppsQueue.size, rects.size)
                     for (i in 0 until count) {
-                        launchAppAt(selectedAppsQueue[i].packageName, rects[i])
-                        Thread.sleep(150)
+                        val pkg = selectedAppsQueue[i].packageName
+                        val bounds = rects[i]
+                        
+                        // *** SHOTGUN STRATEGY ***
+                        // 1. API LAUNCH (Tiles perfectly for Approved apps)
+                        uiHandler.postDelayed({
+                            launchViaApi(pkg, bounds)
+                        }, (i * 150).toLong())
+                        
+                        // 2. SHELL LAUNCH (Forces open Unapproved apps)
+                        // We add a slight offset to ensure API launch happens first
+                        uiHandler.postDelayed({
+                            launchViaShell(pkg)
+                        }, (i * 150 + 50).toLong())
                     }
                     
                     if (selectedAppsQueue.size > rects.size) {
                         val centerRect = Rect(w/4, h/4, (w*0.75).toInt(), (h*0.75).toInt())
                         for (i in rects.size until selectedAppsQueue.size) {
-                            launchAppAt(selectedAppsQueue[i].packageName, centerRect)
-                            Thread.sleep(150)
+                            val pkg = selectedAppsQueue[i].packageName
+                            uiHandler.postDelayed({
+                                launchViaApi(pkg, centerRect)
+                            }, (i * 150).toLong())
+                            uiHandler.postDelayed({
+                                launchViaShell(pkg)
+                            }, (i * 150 + 50).toLong())
                         }
                     }
-                    selectedAppsQueue.clear()
+                    uiHandler.post { selectedAppsQueue.clear() }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Execute Failed", e)
+                showToast("Execute Failed: ${e.message}")
             }
         }.start()
         
         drawerView?.findViewById<EditText>(R.id.rofi_search_bar)?.setText("")
     }
 
-    private fun launchAppAt(pkg: String, bounds: Rect) {
+    private fun launchViaApi(pkg: String, bounds: Rect) {
         try {
-            val i = packageManager.getLaunchIntentForPackage(pkg) ?: return
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            val opts = android.app.ActivityOptions.makeBasic().setLaunchBounds(bounds)
-            startActivity(i, opts.toBundle())
-        } catch (e: Exception) {}
+            val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            val options = android.app.ActivityOptions.makeBasic()
+            options.setLaunchBounds(bounds)
+            startActivity(intent, options.toBundle())
+        } catch (e: Exception) {
+            // Expected for unapproved apps on cover screen
+        }
+    }
+
+    private fun launchViaShell(pkg: String) {
+        try {
+            val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return
+            if (shellService != null) {
+                val component = intent.component?.flattenToShortString() ?: pkg
+                // NO BOUNDS - just open it!
+                val cmd = "am start -n $component -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --display $currentDisplayId --windowingMode 5 --user 0"
+                // Run in background thread to not block UI
+                Thread { shellService?.runCommand(cmd) }.start()
+            }
+        } catch (e: Exception) {
+            // Log.e(TAG, "Shell Launch Error", e)
+        }
+    }
+
+    private fun showToast(msg: String) {
+        uiHandler.post { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
     }
 
     data class LayoutOption(val name: String, val type: Int)
@@ -773,7 +835,7 @@ class FloatingLauncherService : Service() {
             val text: android.widget.TextView = v.findViewById(R.id.layout_name)
             val check: ImageView = v.findViewById(R.id.layout_check_icon)
             val btnSave: ImageView = v.findViewById(R.id.btn_save_profile)
-            val btnExtinguish: ImageView = v.findViewById(R.id.btn_extinguish_item) // New Button
+            val btnExtinguish: ImageView = v.findViewById(R.id.btn_extinguish_item)
         }
         
         inner class DpiHolder(v: View) : RecyclerView.ViewHolder(v) {
@@ -825,7 +887,6 @@ class FloatingLauncherService : Service() {
                 holder.itemView.setOnLongClickListener { toggleFavorite(item); refreshSearchList(); true }
                 
             } else if (holder is LayoutHolder) {
-                // Reset State
                 holder.btnSave.visibility = View.GONE 
                 holder.btnExtinguish.visibility = View.GONE
                 holder.check.visibility = View.INVISIBLE
@@ -865,14 +926,12 @@ class FloatingLauncherService : Service() {
                     holder.itemView.setOnClickListener {
                         item.isEnabled = !item.isEnabled
                         item.onToggle(item.isEnabled)
-                        // Update Text for Target Screen
                         if (item.name.startsWith("Target:")) {
                             holder.text.text = if (item.isEnabled) "Target: Cover Screen (1)" else "Target: Main Screen (0)"
                         }
                         notifyItemChanged(position)
                     }
                     
-                    // SHOW EXTINGUISH BUTTON ONLY ON TARGET SCREEN TOGGLE
                     if (item.name.startsWith("Target:")) {
                         holder.btnExtinguish.visibility = View.VISIBLE
                         holder.btnExtinguish.setOnClickListener { performExtinguish() }
