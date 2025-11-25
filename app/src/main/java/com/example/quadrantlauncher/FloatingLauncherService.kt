@@ -60,6 +60,7 @@ class FloatingLauncherService : Service() {
     private var resetTrackpad = false
     private var isExtinguished = false
     
+    // TODO: UPDATE THIS TO THE REAL PACKAGE NAME OF YOUR TRACKPAD APP
     private val TRACKPAD_PACKAGE = "com.katsuyamaki.trackpad"
     
     private var shellService: IShellService? = null
@@ -529,6 +530,7 @@ class FloatingLauncherService : Service() {
                 displayList.add(FontSizeOption(currentFontSize))
                 displayList.add(IconOption("Launcher Icon (Tap to Change)"))
                 
+                // Settings Toggles
                 displayList.add(ToggleOption("Disable App Kill (Faster)", disableAppKill) { 
                     disableAppKill = it
                     AppPreferences.setDisableKill(this, it)
@@ -748,29 +750,35 @@ class FloatingLauncherService : Service() {
                         val pkg = selectedAppsQueue[i].packageName
                         val bounds = rects[i]
                         
-                        // *** SHOTGUN STRATEGY ***
-                        // 1. API LAUNCH (Tiles perfectly for Approved apps)
+                        // *** SHOTGUN STRATEGY with POST-LAUNCH RESIZE ***
+                        
+                        // 1. API Launch (Main Screen / Approved)
                         uiHandler.postDelayed({
                             launchViaApi(pkg, bounds)
                         }, (i * 150).toLong())
                         
-                        // 2. SHELL LAUNCH (Forces open Unapproved apps)
-                        // We add a slight offset to ensure API launch happens first
+                        // 2. Shell Launch (Unapproved Cover Apps)
                         uiHandler.postDelayed({
                             launchViaShell(pkg)
                         }, (i * 150 + 50).toLong())
+                        
+                        // 3. REPOSITION (The magic fix)
+                        // Wait 800ms for app to launch, then force resize
+                        uiHandler.postDelayed({
+                            Thread { 
+                                try {
+                                    shellService?.repositionTask(pkg, bounds.left, bounds.top, bounds.right, bounds.bottom)
+                                } catch (e: Exception) {}
+                            }.start()
+                        }, (i * 150 + 800).toLong()) 
                     }
                     
                     if (selectedAppsQueue.size > rects.size) {
                         val centerRect = Rect(w/4, h/4, (w*0.75).toInt(), (h*0.75).toInt())
                         for (i in rects.size until selectedAppsQueue.size) {
                             val pkg = selectedAppsQueue[i].packageName
-                            uiHandler.postDelayed({
-                                launchViaApi(pkg, centerRect)
-                            }, (i * 150).toLong())
-                            uiHandler.postDelayed({
-                                launchViaShell(pkg)
-                            }, (i * 150 + 50).toLong())
+                            uiHandler.postDelayed({ launchViaApi(pkg, centerRect) }, (i * 150).toLong())
+                            uiHandler.postDelayed({ launchViaShell(pkg) }, (i * 150 + 50).toLong())
                         }
                     }
                     uiHandler.post { selectedAppsQueue.clear() }
@@ -791,9 +799,7 @@ class FloatingLauncherService : Service() {
             val options = android.app.ActivityOptions.makeBasic()
             options.setLaunchBounds(bounds)
             startActivity(intent, options.toBundle())
-        } catch (e: Exception) {
-            // Expected for unapproved apps on cover screen
-        }
+        } catch (e: Exception) {}
     }
 
     private fun launchViaShell(pkg: String) {
@@ -803,12 +809,9 @@ class FloatingLauncherService : Service() {
                 val component = intent.component?.flattenToShortString() ?: pkg
                 // NO BOUNDS - just open it!
                 val cmd = "am start -n $component -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --display $currentDisplayId --windowingMode 5 --user 0"
-                // Run in background thread to not block UI
                 Thread { shellService?.runCommand(cmd) }.start()
             }
-        } catch (e: Exception) {
-            // Log.e(TAG, "Shell Launch Error", e)
-        }
+        } catch (e: Exception) {}
     }
 
     private fun showToast(msg: String) {
