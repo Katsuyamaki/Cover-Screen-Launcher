@@ -37,6 +37,7 @@ class FloatingLauncherService : Service() {
     
     private var bubbleView: View? = null
     private var drawerView: View? = null
+    
     private lateinit var bubbleParams: WindowManager.LayoutParams
     private lateinit var drawerParams: WindowManager.LayoutParams
 
@@ -51,6 +52,15 @@ class FloatingLauncherService : Service() {
     private var currentDpiSetting = -1
     private var currentFontSize = 16f
     
+    // Settings
+    private var disableAppKill = false
+    private var targetDisplayIndex = 1
+    private var resetTrackpad = false
+    private var isExtinguished = false
+    
+    // TODO: UPDATE THIS TO THE REAL PACKAGE NAME OF YOUR TRACKPAD APP
+    private val TRACKPAD_PACKAGE = "com.katsuyamaki.trackpad"
+    
     private var shellService: IShellService? = null
     private var isBound = false
 
@@ -62,7 +72,6 @@ class FloatingLauncherService : Service() {
         const val MODE_PROFILES = 5
         const val MODE_SETTINGS = 6
         
-        // Layout Types
         const val LAYOUT_SIDE_BY_SIDE = 2
         const val LAYOUT_TRI_EVEN = 3
         const val LAYOUT_CORNERS = 4
@@ -77,7 +86,11 @@ class FloatingLauncherService : Service() {
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_OPEN_DRAWER) {
-                if (!isExpanded) toggleDrawer()
+                if (isExtinguished) {
+                    wakeUp()
+                } else if (!isExpanded) {
+                    toggleDrawer()
+                }
             } else if (intent?.action == ACTION_UPDATE_ICON) {
                 updateBubbleIcon()
             }
@@ -145,6 +158,9 @@ class FloatingLauncherService : Service() {
         }
         loadInstalledApps()
         currentFontSize = AppPreferences.getFontSize(this)
+        disableAppKill = AppPreferences.getDisableKill(this)
+        targetDisplayIndex = AppPreferences.getTargetDisplayIndex(this)
+        resetTrackpad = AppPreferences.getResetTrackpad(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -250,7 +266,6 @@ class FloatingLauncherService : Service() {
         windowManager.addView(bubbleView, bubbleParams)
     }
 
-    // --- ICON LOADING LOGIC ---
     private fun updateBubbleIcon() {
         try {
             val uriStr = AppPreferences.getIconUri(this)
@@ -258,28 +273,20 @@ class FloatingLauncherService : Service() {
             
             if (uriStr != null) {
                 val uri = Uri.parse(uriStr)
-                
-                // 1. Calculate Size to avoid OOM
                 var input = contentResolver.openInputStream(uri)
                 val options = BitmapFactory.Options()
                 options.inJustDecodeBounds = true
                 BitmapFactory.decodeStream(input, null, options)
                 input?.close()
-                
-                // Resize to approx 150x150px
                 options.inSampleSize = calculateInSampleSize(options, 150, 150)
                 options.inJustDecodeBounds = false
-                
-                // 2. Load Real Image
                 input = contentResolver.openInputStream(uri)
                 val bitmap = BitmapFactory.decodeStream(input, null, options)
                 input?.close()
-                
-                // 3. Apply & Remove Tint
                 if (bitmap != null) {
                     iconView?.setImageBitmap(bitmap)
-                    iconView?.imageTintList = null // Clear XML tint
-                    iconView?.clearColorFilter()   // Clear programmatic tint
+                    iconView?.imageTintList = null 
+                    iconView?.clearColorFilter()   
                 } else {
                     iconView?.setImageResource(R.mipmap.ic_launcher_round)
                     iconView?.setColorFilter(Color.WHITE)
@@ -289,7 +296,6 @@ class FloatingLauncherService : Service() {
                 iconView?.setColorFilter(Color.WHITE)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load icon", e)
             val iconView = bubbleView?.findViewById<ImageView>(R.id.bubble_icon)
             iconView?.setImageResource(R.mipmap.ic_launcher_round)
             iconView?.setColorFilter(Color.WHITE)
@@ -332,7 +338,7 @@ class FloatingLauncherService : Service() {
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_profiles).setOnClickListener { switchMode(MODE_PROFILES) }
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_settings).setOnClickListener { switchMode(MODE_SETTINGS) }
         drawerView!!.findViewById<ImageView>(R.id.icon_execute).setOnClickListener { executeLaunch(selectedLayoutType) }
-
+        
         searchBar.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) { filterList(s.toString()) }
             override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
@@ -348,7 +354,12 @@ class FloatingLauncherService : Service() {
         drawerView!!.setOnClickListener { toggleDrawer() }
         drawerView!!.isFocusableInTouchMode = true
         drawerView!!.setOnKeyListener { _, keyCode, event ->
-            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) { toggleDrawer(); true } else false
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) { toggleDrawer(); true } 
+            else if (keyCode == KeyEvent.KEYCODE_VOLUME_UP && isExtinguished) {
+                wakeUp()
+                true
+            }
+            else false
         }
     }
 
@@ -373,6 +384,48 @@ class FloatingLauncherService : Service() {
             et?.requestFocus()
         }
     }
+
+    // --- EXTINGUISH LOGIC ---
+    private fun performExtinguish() {
+        toggleDrawer()
+        isExtinguished = true
+        
+        Thread {
+            try {
+                shellService?.setScreenOff(targetDisplayIndex, true)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }.start()
+        Toast.makeText(this, "Screen OFF (Index $targetDisplayIndex). Vol+ to Wake.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun wakeUp() {
+        isExtinguished = false
+        Thread { 
+            shellService?.setScreenOff(0, false) 
+            shellService?.setScreenOff(1, false)
+        }.start()
+        Toast.makeText(this, "Screen Woke Up", Toast.LENGTH_SHORT).show()
+    }
+
+    // --- TRACKPAD LOGIC ---
+    private fun restartTrackpad() {
+        try {
+            // 1. Kill
+            shellService?.forceStop(TRACKPAD_PACKAGE)
+            // 2. Start (Launch Intent)
+            val i = packageManager.getLaunchIntentForPackage(TRACKPAD_PACKAGE)
+            if (i != null) {
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                startActivity(i)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to reset trackpad", e)
+        }
+    }
+
+    // --- OTHER LOGIC ---
 
     private fun loadInstalledApps() {
         val pm = packageManager
@@ -452,6 +505,25 @@ class FloatingLauncherService : Service() {
                 searchBar.hint = "Settings"
                 displayList.add(FontSizeOption(currentFontSize))
                 displayList.add(IconOption("Launcher Icon (Tap to Change)"))
+                
+                // Settings Toggles
+                displayList.add(ToggleOption("Disable App Kill (Faster)", disableAppKill) { 
+                    disableAppKill = it
+                    AppPreferences.setDisableKill(this, it)
+                })
+                
+                val targetText = if (targetDisplayIndex == 1) "Target: Cover Screen (1)" else "Target: Main Screen (0)"
+                // IMPORTANT: The 'ToggleOption' here also serves as the row for the power button
+                displayList.add(ToggleOption(targetText, targetDisplayIndex == 1) { 
+                    targetDisplayIndex = if (it) 1 else 0
+                    AppPreferences.setTargetDisplayIndex(this, targetDisplayIndex)
+                    switchMode(MODE_SETTINGS)
+                })
+
+                displayList.add(ToggleOption("Reset Trackpad on Execute", resetTrackpad) {
+                    resetTrackpad = it
+                    AppPreferences.setResetTrackpad(this, it)
+                })
             }
         }
         drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
@@ -516,11 +588,7 @@ class FloatingLauncherService : Service() {
         AppPreferences.saveFontSize(this, currentFontSize)
         updateGlobalFontSize()
         if (currentMode == MODE_SETTINGS) {
-            val iconItem = displayList.find { it is IconOption }
-            displayList.clear()
-            displayList.add(FontSizeOption(currentFontSize))
-            if (iconItem != null) displayList.add(iconItem)
-            (drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter as RofiAdapter).notifyDataSetChanged()
+            switchMode(MODE_SETTINGS)
         }
     }
     
@@ -583,26 +651,20 @@ class FloatingLauncherService : Service() {
             else -> "wm size reset -d $currentDisplayId"
         }
     }
-
-    // Helper to get dimensions from selected index to pre-calc rects
+    
     private fun getTargetDimensions(index: Int): Pair<Int, Int>? {
         return when(index) {
             1 -> 1422 to 1500
             2 -> 1920 to 1080
             3 -> 3840 to 1080
-            else -> null // Use system default
+            else -> null 
         }
     }
 
     private fun executeLaunch(layoutType: Int) {
         toggleDrawer() 
         
-        // 1. Determine Target Resolution Dimensions
         val targetDim = getTargetDimensions(selectedResolutionIndex)
-        
-        // If target is null (Reset/Default), use current system metrics.
-        // If target is set (e.g. 1920x1080), use those numbers explicitly
-        // because 'wm size' command takes time to apply.
         val w = targetDim?.first ?: windowManager.maximumWindowMetrics.bounds.width()
         val h = targetDim?.second ?: windowManager.maximumWindowMetrics.bounds.height()
         
@@ -610,24 +672,20 @@ class FloatingLauncherService : Service() {
         
         when (layoutType) {
             LAYOUT_SIDE_BY_SIDE -> { 
-                // 1 Row, 2 Cols
                 rects.add(Rect(0, 0, w/2, h))
                 rects.add(Rect(w/2, 0, w, h)) 
             }
             LAYOUT_TOP_BOTTOM -> { 
-                // 2 Rows, 1 Col
                 rects.add(Rect(0, 0, w, h/2))
                 rects.add(Rect(0, h/2, w, h))
             }
             LAYOUT_TRI_EVEN -> { 
-                // 1 Row, 3 Cols (Evenly split)
                 val third = w / 3
                 rects.add(Rect(0, 0, third, h))
                 rects.add(Rect(third, 0, third * 2, h))
                 rects.add(Rect(third * 2, 0, w, h))
             }
             LAYOUT_CORNERS -> { 
-                // 2 Rows, 2 Cols (Quadrants)
                 rects.add(Rect(0, 0, w/2, h/2))
                 rects.add(Rect(w/2, 0, w, h/2))
                 rects.add(Rect(0, h/2, w/2, h))
@@ -637,11 +695,9 @@ class FloatingLauncherService : Service() {
 
         Thread {
             try {
-                // STEP 1: Apply Resolution
                 val resCmd = getResolutionCommand(selectedResolutionIndex)
                 shellService?.runCommand(resCmd)
                 
-                // STEP 2: Apply DPI
                 if (currentDpiSetting > 0) {
                      val dpiCmd = "wm density $currentDpiSetting -d $currentDisplayId"
                      shellService?.runCommand(dpiCmd)
@@ -650,11 +706,20 @@ class FloatingLauncherService : Service() {
                 }
 
                 Thread.sleep(600)
+                
+                // --- TRACKPAD RESET ---
+                if (resetTrackpad) {
+                    restartTrackpad()
+                    Thread.sleep(200)
+                }
 
-                // STEP 3: Kill & Launch
                 if (selectedAppsQueue.isNotEmpty()) {
-                    for (app in selectedAppsQueue) shellService?.forceStop(app.packageName)
-                    Thread.sleep(400)
+                    if (!disableAppKill) {
+                        for (app in selectedAppsQueue) shellService?.forceStop(app.packageName)
+                        Thread.sleep(400)
+                    } else {
+                        Thread.sleep(100)
+                    }
                     
                     val count = Math.min(selectedAppsQueue.size, rects.size)
                     for (i in 0 until count) {
@@ -662,8 +727,6 @@ class FloatingLauncherService : Service() {
                         Thread.sleep(150)
                     }
                     
-                    // Handle overflow (if user selected more apps than layout supports)
-                    // We just pile them in the center for now
                     if (selectedAppsQueue.size > rects.size) {
                         val centerRect = Rect(w/4, h/4, (w*0.75).toInt(), (h*0.75).toInt())
                         for (i in rects.size until selectedAppsQueue.size) {
@@ -696,6 +759,7 @@ class FloatingLauncherService : Service() {
     data class ProfileOption(val name: String, val isCurrent: Boolean)
     data class FontSizeOption(val currentSize: Float)
     data class IconOption(val name: String)
+    data class ToggleOption(val name: String, var isEnabled: Boolean, val onToggle: (Boolean) -> Unit)
 
     inner class RofiAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         
@@ -709,6 +773,7 @@ class FloatingLauncherService : Service() {
             val text: android.widget.TextView = v.findViewById(R.id.layout_name)
             val check: ImageView = v.findViewById(R.id.layout_check_icon)
             val btnSave: ImageView = v.findViewById(R.id.btn_save_profile)
+            val btnExtinguish: ImageView = v.findViewById(R.id.btn_extinguish_item) // New Button
         }
         
         inner class DpiHolder(v: View) : RecyclerView.ViewHolder(v) {
@@ -731,7 +796,8 @@ class FloatingLauncherService : Service() {
                 is DpiOption -> 2
                 is ProfileOption -> 1
                 is FontSizeOption -> 3
-                is IconOption -> 1 
+                is IconOption -> 1
+                is ToggleOption -> 1
                 else -> 0
             }
         }
@@ -759,7 +825,9 @@ class FloatingLauncherService : Service() {
                 holder.itemView.setOnLongClickListener { toggleFavorite(item); refreshSearchList(); true }
                 
             } else if (holder is LayoutHolder) {
+                // Reset State
                 holder.btnSave.visibility = View.GONE 
+                holder.btnExtinguish.visibility = View.GONE
                 holder.check.visibility = View.INVISIBLE
 
                 if (item is LayoutOption) {
@@ -789,6 +857,26 @@ class FloatingLauncherService : Service() {
                     holder.text.text = item.name
                     holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
                     holder.itemView.setOnClickListener { pickIcon() }
+                } else if (item is ToggleOption) {
+                    holder.text.text = item.name
+                    holder.check.visibility = if (item.isEnabled) View.VISIBLE else View.INVISIBLE
+                    holder.check.setImageResource(android.R.drawable.checkbox_on_background)
+                    holder.check.setColorFilter(if (item.isEnabled) 0xFF00FF00.toInt() else 0xFF888888.toInt())
+                    holder.itemView.setOnClickListener {
+                        item.isEnabled = !item.isEnabled
+                        item.onToggle(item.isEnabled)
+                        // Update Text for Target Screen
+                        if (item.name.startsWith("Target:")) {
+                            holder.text.text = if (item.isEnabled) "Target: Cover Screen (1)" else "Target: Main Screen (0)"
+                        }
+                        notifyItemChanged(position)
+                    }
+                    
+                    // SHOW EXTINGUISH BUTTON ONLY ON TARGET SCREEN TOGGLE
+                    if (item.name.startsWith("Target:")) {
+                        holder.btnExtinguish.visibility = View.VISIBLE
+                        holder.btnExtinguish.setOnClickListener { performExtinguish() }
+                    }
                 }
                 
             } else if (holder is DpiHolder && item is DpiOption) {
