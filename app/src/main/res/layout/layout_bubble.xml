@@ -3,7 +3,10 @@
     android:layout_width="60dp"
     android:layout_height="60dp"
     android:background="@drawable/bg_bubble"
-    android:filterTouchesWhenObscured="false"> <ImageView
+    android:filterTouchesWhenObscured="false"> 
+    
+    <ImageView
+        android:id="@+id/bubble_icon"
         android:layout_width="40dp"
         android:layout_height="40dp"
         android:layout_gravity="center"

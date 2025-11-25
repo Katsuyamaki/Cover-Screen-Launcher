@@ -9,7 +9,9 @@ object AppPreferences {
     private const val KEY_LAST_LAYOUT = "KEY_LAST_LAYOUT"
     private const val KEY_LAST_RESOLUTION = "KEY_LAST_RESOLUTION"
     private const val KEY_LAST_DPI = "KEY_LAST_DPI"
-    private const val KEY_PROFILES = "KEY_PROFILES" // Set of profile names
+    private const val KEY_PROFILES = "KEY_PROFILES"
+    private const val KEY_FONT_SIZE = "KEY_FONT_SIZE"
+    private const val KEY_ICON_URI = "KEY_ICON_URI"
 
     private fun getPrefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -82,13 +84,11 @@ object AppPreferences {
     }
 
     fun saveProfile(context: Context, name: String, layout: Int, resIndex: Int, dpi: Int, apps: List<String>) {
-        // 1. Add name to index
         val names = getProfileNames(context)
         val newNames = HashSet(names)
         newNames.add(name)
         getPrefs(context).edit().putStringSet(KEY_PROFILES, newNames).apply()
 
-        // 2. Save data: layout|res|dpi|pkg1,pkg2
         val appString = apps.joinToString(",")
         val data = "$layout|$resIndex|$dpi|$appString"
         getPrefs(context).edit().putString("PROFILE_$name", data).apply()
@@ -103,5 +103,25 @@ object AppPreferences {
         val newNames = HashSet(names)
         newNames.remove(name)
         getPrefs(context).edit().putStringSet(KEY_PROFILES, newNames).remove("PROFILE_$name").apply()
+    }
+
+    // --- FONT SIZE ---
+
+    fun saveFontSize(context: Context, size: Float) {
+        getPrefs(context).edit().putFloat(KEY_FONT_SIZE, size).apply()
+    }
+
+    fun getFontSize(context: Context): Float {
+        return getPrefs(context).getFloat(KEY_FONT_SIZE, 16f)
+    }
+
+    // --- LAUNCHER ICON ---
+
+    fun saveIconUri(context: Context, uri: String) {
+        getPrefs(context).edit().putString(KEY_ICON_URI, uri).apply()
+    }
+
+    fun getIconUri(context: Context): String? {
+        return getPrefs(context).getString(KEY_ICON_URI, null)
     }
 }

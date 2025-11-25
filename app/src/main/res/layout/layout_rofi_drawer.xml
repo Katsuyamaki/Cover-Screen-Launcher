@@ -51,17 +51,6 @@
                 android:imeOptions="actionDone"/>
 
             <ImageView
-                android:id="@+id/icon_save"
-                android:layout_width="32dp"
-                android:layout_height="32dp"
-                android:padding="6dp"
-                android:src="@android:drawable/ic_menu_save"
-                android:tint="#00AAFF"
-                android:background="@drawable/bg_item_press"
-                android:visibility="gone"
-                android:tooltipText="Save Profile"/>
-
-            <ImageView
                 android:id="@+id/icon_execute"
                 android:layout_width="32dp"
                 android:layout_height="32dp"

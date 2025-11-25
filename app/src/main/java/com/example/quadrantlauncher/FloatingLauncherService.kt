@@ -7,10 +7,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
-import android.graphics.Canvas
-import android.graphics.Color
+import android.graphics.BitmapFactory
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Color
+import android.net.Uri
 import android.hardware.display.DisplayManager
 import android.os.IBinder
 import android.text.Editable
@@ -20,6 +21,7 @@ import android.view.*
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.Toast
+import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -46,7 +48,8 @@ class FloatingLauncherService : Service() {
     private var currentMode = MODE_SEARCH
     private var selectedLayoutType = 2
     private var selectedResolutionIndex = 0
-    private var currentDpiSetting = -1 // -1 means default
+    private var currentDpiSetting = -1
+    private var currentFontSize = 16f
     
     private var shellService: IShellService? = null
     private var isBound = false
@@ -56,17 +59,27 @@ class FloatingLauncherService : Service() {
         const val MODE_LAYOUTS = 2
         const val MODE_RESOLUTION = 3
         const val MODE_DPI = 4
-        const val MODE_PROFILES = 5 // NEW
+        const val MODE_PROFILES = 5
         const val MODE_SETTINGS = 6
+        
+        // Layout Types
+        const val LAYOUT_SIDE_BY_SIDE = 2
+        const val LAYOUT_TRI_EVEN = 3
+        const val LAYOUT_CORNERS = 4
+        const val LAYOUT_TOP_BOTTOM = 5
+
         const val CHANNEL_ID = "OverlayServiceChannel"
         const val TAG = "FloatingService"
         const val ACTION_OPEN_DRAWER = "com.example.quadrantlauncher.OPEN_DRAWER"
+        const val ACTION_UPDATE_ICON = "com.example.quadrantlauncher.UPDATE_ICON"
     }
 
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_OPEN_DRAWER) {
                 if (!isExpanded) toggleDrawer()
+            } else if (intent?.action == ACTION_UPDATE_ICON) {
+                updateBubbleIcon()
             }
         }
     }
@@ -78,21 +91,18 @@ class FloatingLauncherService : Service() {
             val pos = viewHolder.adapterPosition
             if (pos == RecyclerView.NO_POSITION) return
             
-            // Swipe to Delete Profile
             if (currentMode == MODE_PROFILES) {
                 val item = displayList.getOrNull(pos) as? ProfileOption ?: return
                 if (item.isCurrent) {
-                     // Can't delete "Current Profile" header
                      (drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter as RofiAdapter).notifyItemChanged(pos)
                      return
                 }
                 AppPreferences.deleteProfile(this@FloatingLauncherService, item.name)
                 Toast.makeText(this@FloatingLauncherService, "Deleted ${item.name}", Toast.LENGTH_SHORT).show()
-                switchMode(MODE_PROFILES) // Refresh
+                switchMode(MODE_PROFILES)
                 return
             }
 
-            // Swipe to Favorite Apps
             if (currentMode == MODE_SEARCH) {
                 val item = displayList.getOrNull(pos) as? MainActivity.AppInfo ?: return
                 if (direction == ItemTouchHelper.LEFT && !item.isFavorite) toggleFavorite(item)
@@ -119,7 +129,11 @@ class FloatingLauncherService : Service() {
         super.onCreate()
         startForegroundService()
         
-        val filter = IntentFilter(ACTION_OPEN_DRAWER)
+        val filter = IntentFilter().apply {
+            addAction(ACTION_OPEN_DRAWER)
+            addAction(ACTION_UPDATE_ICON)
+        }
+
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             registerReceiver(commandReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
@@ -130,6 +144,7 @@ class FloatingLauncherService : Service() {
             bindShizuku()
         }
         loadInstalledApps()
+        currentFontSize = AppPreferences.getFontSize(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -143,6 +158,8 @@ class FloatingLauncherService : Service() {
             selectedLayoutType = AppPreferences.getLastLayout(this)
             selectedResolutionIndex = AppPreferences.getLastResolution(this)
             currentDpiSetting = AppPreferences.getLastDpi(this)
+            updateGlobalFontSize()
+            updateBubbleIcon()
         } catch (e: Exception) {
             stopSelf()
         }
@@ -233,6 +250,65 @@ class FloatingLauncherService : Service() {
         windowManager.addView(bubbleView, bubbleParams)
     }
 
+    // --- ICON LOADING LOGIC ---
+    private fun updateBubbleIcon() {
+        try {
+            val uriStr = AppPreferences.getIconUri(this)
+            val iconView = bubbleView?.findViewById<ImageView>(R.id.bubble_icon)
+            
+            if (uriStr != null) {
+                val uri = Uri.parse(uriStr)
+                
+                // 1. Calculate Size to avoid OOM
+                var input = contentResolver.openInputStream(uri)
+                val options = BitmapFactory.Options()
+                options.inJustDecodeBounds = true
+                BitmapFactory.decodeStream(input, null, options)
+                input?.close()
+                
+                // Resize to approx 150x150px
+                options.inSampleSize = calculateInSampleSize(options, 150, 150)
+                options.inJustDecodeBounds = false
+                
+                // 2. Load Real Image
+                input = contentResolver.openInputStream(uri)
+                val bitmap = BitmapFactory.decodeStream(input, null, options)
+                input?.close()
+                
+                // 3. Apply & Remove Tint
+                if (bitmap != null) {
+                    iconView?.setImageBitmap(bitmap)
+                    iconView?.imageTintList = null // Clear XML tint
+                    iconView?.clearColorFilter()   // Clear programmatic tint
+                } else {
+                    iconView?.setImageResource(R.mipmap.ic_launcher_round)
+                    iconView?.setColorFilter(Color.WHITE)
+                }
+            } else {
+                iconView?.setImageResource(R.mipmap.ic_launcher_round)
+                iconView?.setColorFilter(Color.WHITE)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load icon", e)
+            val iconView = bubbleView?.findViewById<ImageView>(R.id.bubble_icon)
+            iconView?.setImageResource(R.mipmap.ic_launcher_round)
+            iconView?.setColorFilter(Color.WHITE)
+        }
+    }
+
+    private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
+        val (height: Int, width: Int) = options.outHeight to options.outWidth
+        var inSampleSize = 1
+        if (height > reqHeight || width > reqWidth) {
+            val halfHeight: Int = height / 2
+            val halfWidth: Int = width / 2
+            while ((halfHeight / inSampleSize) >= reqHeight && (halfWidth / inSampleSize) >= reqWidth) {
+                inSampleSize *= 2
+            }
+        }
+        return inSampleSize
+    }
+
     private fun setupDrawer() {
         val context = displayContext ?: this
         val themeContext = ContextThemeWrapper(context, R.style.Theme_QuadrantLauncher)
@@ -255,8 +331,6 @@ class FloatingLauncherService : Service() {
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_dpi).setOnClickListener { switchMode(MODE_DPI) }
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_profiles).setOnClickListener { switchMode(MODE_PROFILES) }
         drawerView!!.findViewById<ImageView>(R.id.icon_mode_settings).setOnClickListener { switchMode(MODE_SETTINGS) }
-        
-        drawerView!!.findViewById<ImageView>(R.id.icon_save).setOnClickListener { saveProfile() }
         drawerView!!.findViewById<ImageView>(R.id.icon_execute).setOnClickListener { executeLaunch(selectedLayoutType) }
 
         searchBar.addTextChangedListener(object : TextWatcher {
@@ -276,6 +350,12 @@ class FloatingLauncherService : Service() {
         drawerView!!.setOnKeyListener { _, keyCode, event ->
             if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) { toggleDrawer(); true } else false
         }
+    }
+
+    private fun updateGlobalFontSize() {
+        val searchBar = drawerView?.findViewById<EditText>(R.id.rofi_search_bar)
+        searchBar?.textSize = currentFontSize
+        drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
     }
 
     private fun toggleDrawer() {
@@ -320,7 +400,6 @@ class FloatingLauncherService : Service() {
         val iconProf = drawerView!!.findViewById<ImageView>(R.id.icon_mode_profiles)
         val iconSet = drawerView!!.findViewById<ImageView>(R.id.icon_mode_settings)
         val executeBtn = drawerView!!.findViewById<ImageView>(R.id.icon_execute)
-        val saveBtn = drawerView!!.findViewById<ImageView>(R.id.icon_save)
         
         searchIcon.setColorFilter(if(mode==MODE_SEARCH) Color.WHITE else Color.GRAY)
         iconWin.setColorFilter(if(mode==MODE_LAYOUTS) Color.WHITE else Color.GRAY)
@@ -330,7 +409,6 @@ class FloatingLauncherService : Service() {
         iconSet.setColorFilter(if(mode==MODE_SETTINGS) Color.WHITE else Color.GRAY)
 
         executeBtn.visibility = View.VISIBLE 
-        saveBtn.visibility = if(mode==MODE_PROFILES) View.VISIBLE else View.GONE
         
         displayList.clear()
         
@@ -341,9 +419,10 @@ class FloatingLauncherService : Service() {
             }
             MODE_LAYOUTS -> {
                 searchBar.hint = "Select Layout"
-                displayList.add(LayoutOption("Split Screen (2 Apps)", 2))
-                displayList.add(LayoutOption("Tri-Split (3 Apps)", 3))
-                displayList.add(LayoutOption("Quadrant (4 Apps)", 4))
+                displayList.add(LayoutOption("2 Apps - Side by Side", LAYOUT_SIDE_BY_SIDE))
+                displayList.add(LayoutOption("2 Apps - Top & Bottom", LAYOUT_TOP_BOTTOM))
+                displayList.add(LayoutOption("3 Apps - Even", LAYOUT_TRI_EVEN))
+                displayList.add(LayoutOption("4 Apps - Corners", LAYOUT_CORNERS))
             }
             MODE_RESOLUTION -> {
                 searchBar.hint = "Select Resolution"
@@ -369,7 +448,11 @@ class FloatingLauncherService : Service() {
                     displayList.add(ProfileOption(p, false))
                 }
             }
-            MODE_SETTINGS -> { searchBar.hint = "Settings (Config)" }
+            MODE_SETTINGS -> {
+                searchBar.hint = "Settings"
+                displayList.add(FontSizeOption(currentFontSize))
+                displayList.add(IconOption("Launcher Icon (Tap to Change)"))
+            }
         }
         drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
     }
@@ -420,28 +503,44 @@ class FloatingLauncherService : Service() {
             selectedResolutionIndex = opt.index
             AppPreferences.saveLastResolution(this, opt.index)
         }
-        // Do NOT execute here, just select. Only reset executes immediately? 
-        // User said "resolution change to happen only when the play button is pressed".
-        // But reset is usually instant. Let's follow user instructions: "only when play button pressed".
-        // So we just update selection UI.
         (drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter as RofiAdapter).notifyDataSetChanged()
     }
     
     private fun selectDpi(value: Int) {
         currentDpiSetting = value.coerceIn(100, 400)
         AppPreferences.saveLastDpi(this, currentDpiSetting)
-        // No execute
+    }
+    
+    private fun changeFontSize(newSize: Float) {
+        currentFontSize = newSize.coerceIn(10f, 30f)
+        AppPreferences.saveFontSize(this, currentFontSize)
+        updateGlobalFontSize()
+        if (currentMode == MODE_SETTINGS) {
+            val iconItem = displayList.find { it is IconOption }
+            displayList.clear()
+            displayList.add(FontSizeOption(currentFontSize))
+            if (iconItem != null) displayList.add(iconItem)
+            (drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter as RofiAdapter).notifyDataSetChanged()
+        }
+    }
+    
+    private fun pickIcon() {
+        toggleDrawer()
+        try {
+            val intent = Intent(this, IconPickerActivity::class.java)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Cannot start picker: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
-    // --- PROFILE LOGIC ---
-    
     private fun saveProfile() {
         val name = drawerView?.findViewById<EditText>(R.id.rofi_search_bar)?.text?.toString()?.trim()
         if (name.isNullOrEmpty()) {
-            Toast.makeText(this, "Enter a profile name", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Enter a profile name in the search bar", Toast.LENGTH_SHORT).show()
             return
         }
-        // Package list
         val pkgs = selectedAppsQueue.map { it.packageName }
         AppPreferences.saveProfile(this, name, selectedLayoutType, selectedResolutionIndex, currentDpiSetting, pkgs)
         Toast.makeText(this, "Saved Profile: $name", Toast.LENGTH_SHORT).show()
@@ -485,18 +584,55 @@ class FloatingLauncherService : Service() {
         }
     }
 
+    // Helper to get dimensions from selected index to pre-calc rects
+    private fun getTargetDimensions(index: Int): Pair<Int, Int>? {
+        return when(index) {
+            1 -> 1422 to 1500
+            2 -> 1920 to 1080
+            3 -> 3840 to 1080
+            else -> null // Use system default
+        }
+    }
+
     private fun executeLaunch(layoutType: Int) {
         toggleDrawer() 
         
-        val metrics = windowManager.maximumWindowMetrics
-        val w = metrics.bounds.width()
-        val h = metrics.bounds.height()
+        // 1. Determine Target Resolution Dimensions
+        val targetDim = getTargetDimensions(selectedResolutionIndex)
+        
+        // If target is null (Reset/Default), use current system metrics.
+        // If target is set (e.g. 1920x1080), use those numbers explicitly
+        // because 'wm size' command takes time to apply.
+        val w = targetDim?.first ?: windowManager.maximumWindowMetrics.bounds.width()
+        val h = targetDim?.second ?: windowManager.maximumWindowMetrics.bounds.height()
+        
         val rects = mutableListOf<Rect>()
         
         when (layoutType) {
-            2 -> { rects.add(Rect(0, 0, w, h/2)); rects.add(Rect(0, h/2, w, h)) }
-            3 -> { rects.add(Rect(0, 0, w, h/2)); rects.add(Rect(0, h/2, w/2, h)); rects.add(Rect(w/2, h/2, w, h)) }
-            4 -> { rects.add(Rect(0, 0, w/2, h/2)); rects.add(Rect(w/2, 0, w, h/2)); rects.add(Rect(0, h/2, w/2, h)); rects.add(Rect(w/2, h/2, w, h)) }
+            LAYOUT_SIDE_BY_SIDE -> { 
+                // 1 Row, 2 Cols
+                rects.add(Rect(0, 0, w/2, h))
+                rects.add(Rect(w/2, 0, w, h)) 
+            }
+            LAYOUT_TOP_BOTTOM -> { 
+                // 2 Rows, 1 Col
+                rects.add(Rect(0, 0, w, h/2))
+                rects.add(Rect(0, h/2, w, h))
+            }
+            LAYOUT_TRI_EVEN -> { 
+                // 1 Row, 3 Cols (Evenly split)
+                val third = w / 3
+                rects.add(Rect(0, 0, third, h))
+                rects.add(Rect(third, 0, third * 2, h))
+                rects.add(Rect(third * 2, 0, w, h))
+            }
+            LAYOUT_CORNERS -> { 
+                // 2 Rows, 2 Cols (Quadrants)
+                rects.add(Rect(0, 0, w/2, h/2))
+                rects.add(Rect(w/2, 0, w, h/2))
+                rects.add(Rect(0, h/2, w/2, h))
+                rects.add(Rect(w/2, h/2, w, h))
+            }
         }
 
         Thread {
@@ -510,9 +646,6 @@ class FloatingLauncherService : Service() {
                      val dpiCmd = "wm density $currentDpiSetting -d $currentDisplayId"
                      shellService?.runCommand(dpiCmd)
                 } else {
-                     // If Reset (index 0 or -1) selected? 
-                     // If selectedResolutionIndex == 0 (Reset), user might expect DPI reset too?
-                     // Let's respect the explicit DPI setting. If user set it to -1 (default), we reset.
                      if (currentDpiSetting == -1) shellService?.runCommand("wm density reset -d $currentDisplayId")
                 }
 
@@ -529,6 +662,8 @@ class FloatingLauncherService : Service() {
                         Thread.sleep(150)
                     }
                     
+                    // Handle overflow (if user selected more apps than layout supports)
+                    // We just pile them in the center for now
                     if (selectedAppsQueue.size > rects.size) {
                         val centerRect = Rect(w/4, h/4, (w*0.75).toInt(), (h*0.75).toInt())
                         for (i in rects.size until selectedAppsQueue.size) {
@@ -559,6 +694,8 @@ class FloatingLauncherService : Service() {
     data class ResolutionOption(val name: String, val command: String, val index: Int)
     data class DpiOption(val currentDpi: Int)
     data class ProfileOption(val name: String, val isCurrent: Boolean)
+    data class FontSizeOption(val currentSize: Float)
+    data class IconOption(val name: String)
 
     inner class RofiAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         
@@ -571,6 +708,7 @@ class FloatingLauncherService : Service() {
         inner class LayoutHolder(v: View) : RecyclerView.ViewHolder(v) {
             val text: android.widget.TextView = v.findViewById(R.id.layout_name)
             val check: ImageView = v.findViewById(R.id.layout_check_icon)
+            val btnSave: ImageView = v.findViewById(R.id.btn_save_profile)
         }
         
         inner class DpiHolder(v: View) : RecyclerView.ViewHolder(v) {
@@ -579,13 +717,21 @@ class FloatingLauncherService : Service() {
             val input: EditText = v.findViewById(R.id.input_dpi_value)
         }
 
+        inner class FontSizeHolder(v: View) : RecyclerView.ViewHolder(v) {
+            val btnMinus: ImageView = v.findViewById(R.id.btn_font_minus)
+            val btnPlus: ImageView = v.findViewById(R.id.btn_font_plus)
+            val textVal: TextView = v.findViewById(R.id.text_font_value)
+        }
+
         override fun getItemViewType(position: Int): Int {
             return when (displayList[position]) {
                 is MainActivity.AppInfo -> 0
                 is LayoutOption -> 1
                 is ResolutionOption -> 1 
                 is DpiOption -> 2
-                is ProfileOption -> 1 // Reuse simple layout holder
+                is ProfileOption -> 1
+                is FontSizeOption -> 3
+                is IconOption -> 1 
                 else -> 0
             }
         }
@@ -595,6 +741,7 @@ class FloatingLauncherService : Service() {
                 0 -> AppHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_app_rofi, parent, false))
                 1 -> LayoutHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_layout_option, parent, false))
                 2 -> DpiHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_dpi_custom, parent, false))
+                3 -> FontSizeHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_font_size, parent, false))
                 else -> AppHolder(View(parent.context))
             }
         }
@@ -602,6 +749,9 @@ class FloatingLauncherService : Service() {
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             val item = displayList[position]
             
+            if (holder is AppHolder) holder.text.textSize = currentFontSize
+            if (holder is LayoutHolder) holder.text.textSize = currentFontSize
+
             if (holder is AppHolder && item is MainActivity.AppInfo) {
                 holder.text.text = item.label
                 holder.star.visibility = if (item.isFavorite) View.VISIBLE else View.GONE
@@ -609,6 +759,9 @@ class FloatingLauncherService : Service() {
                 holder.itemView.setOnLongClickListener { toggleFavorite(item); refreshSearchList(); true }
                 
             } else if (holder is LayoutHolder) {
+                holder.btnSave.visibility = View.GONE 
+                holder.check.visibility = View.INVISIBLE
+
                 if (item is LayoutOption) {
                     holder.text.text = item.name
                     val isSelected = (item.type == selectedLayoutType)
@@ -625,29 +778,37 @@ class FloatingLauncherService : Service() {
                     
                 } else if (item is ProfileOption) {
                     holder.text.text = item.name
-                    holder.check.visibility = View.INVISIBLE // No checkmark for profiles
                     holder.itemView.setBackgroundResource(0)
-                    if (!item.isCurrent) {
+                    if (item.isCurrent) {
+                        holder.btnSave.visibility = View.VISIBLE
+                        holder.btnSave.setOnClickListener { saveProfile() }
+                    } else {
                         holder.itemView.setOnClickListener { loadProfile(item.name) }
                     }
+                } else if (item is IconOption) {
+                    holder.text.text = item.name
+                    holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
+                    holder.itemView.setOnClickListener { pickIcon() }
                 }
                 
             } else if (holder is DpiHolder && item is DpiOption) {
                 holder.input.setText(item.currentDpi.toString())
-                
                 holder.btnMinus.setOnClickListener {
                     val v = holder.input.text.toString().toIntOrNull() ?: 160
                     val newVal = (v - 5).coerceAtLeast(100)
                     holder.input.setText(newVal.toString())
                     selectDpi(newVal)
                 }
-                
                 holder.btnPlus.setOnClickListener {
                     val v = holder.input.text.toString().toIntOrNull() ?: 160
                     val newVal = (v + 5).coerceAtMost(400)
                     holder.input.setText(newVal.toString())
                     selectDpi(newVal)
                 }
+            } else if (holder is FontSizeHolder && item is FontSizeOption) {
+                holder.textVal.text = item.currentSize.toInt().toString()
+                holder.btnMinus.setOnClickListener { changeFontSize(item.currentSize - 1) }
+                holder.btnPlus.setOnClickListener { changeFontSize(item.currentSize + 1) }
             }
         }
         override fun getItemCount() = displayList.size
