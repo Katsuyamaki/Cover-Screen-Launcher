@@ -1,4 +1,3 @@
-
 # CoverScreen Launcher & Tiling Manager
 
 ![Kotlin](https://img.shields.io/badge/Kotlin-2.0-blue.svg) ![Platform](https://img.shields.io/badge/Platform-Android%2014%2B-green.svg) ![Status](https://img.shields.io/badge/Status-Experimental-orange.svg)
