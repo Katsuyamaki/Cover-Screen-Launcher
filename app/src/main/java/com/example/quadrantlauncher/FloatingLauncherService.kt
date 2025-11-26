@@ -31,6 +31,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import rikka.shizuku.Shizuku
 import java.util.*
+import kotlin.math.hypot
 
 class FloatingLauncherService : Service() {
 
@@ -234,13 +235,10 @@ class FloatingLauncherService : Service() {
     private fun cycleDisplay() {
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         
-        // FORCE TOGGLE: If 0 -> 1. If 1 -> 0. 
-        // This overrides the "list" logic because Main Screen often hides Cover Screen from the list.
         var targetId = if (currentDisplayId == 0) 1 else 0
         var targetDisplay = dm.getDisplay(targetId)
         
         if (targetDisplay == null) {
-            // Fallback: If the preferred toggle target isn't found, cycle through what IS available.
             val displays = dm.displays
             val currentIdx = displays.indexOfFirst { it.displayId == currentDisplayId }
             val nextIdx = if (currentIdx == -1) 0 else (currentIdx + 1) % displays.size
@@ -254,7 +252,6 @@ class FloatingLauncherService : Service() {
 
         val newId = targetDisplay.displayId
         
-        // 1. Cleanup Old Views
         try {
             if (bubbleView != null && bubbleView!!.isAttachedToWindow) windowManager.removeView(bubbleView)
             if (drawerView != null && drawerView!!.isAttachedToWindow) windowManager.removeView(drawerView)
@@ -262,18 +259,15 @@ class FloatingLauncherService : Service() {
             Log.e(TAG, "Error removing views", e)
         }
 
-        // 2. Update Context
         currentDisplayId = newId
         setupDisplayContext(currentDisplayId)
 
-        // 3. Sync Settings
         targetDisplayIndex = currentDisplayId
         AppPreferences.setTargetDisplayIndex(this, targetDisplayIndex)
 
-        // 4. Rebuild UI
         setupBubble()
         setupDrawer()
-        updateBubbleIcon() // Explicitly restore the icon
+        updateBubbleIcon() 
         
         isExpanded = false
         showToast("Switched to Display $currentDisplayId")
@@ -335,9 +329,17 @@ class FloatingLauncherService : Service() {
         bubbleParams.gravity = Gravity.TOP or Gravity.START
         bubbleParams.x = 50; bubbleParams.y = 200
 
+        var velocityTracker: VelocityTracker? = null
+
         bubbleView?.setOnTouchListener(object : View.OnTouchListener {
             var initialX = 0; var initialY = 0; var initialTouchX = 0f; var initialTouchY = 0f; var isDrag = false
+            
             override fun onTouch(v: View, event: MotionEvent): Boolean {
+                if (velocityTracker == null) {
+                    velocityTracker = VelocityTracker.obtain()
+                }
+                velocityTracker?.addMovement(event)
+
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         initialX = bubbleParams.x; initialY = bubbleParams.y
@@ -354,8 +356,27 @@ class FloatingLauncherService : Service() {
                         return true
                     }
                     MotionEvent.ACTION_UP -> {
+                        velocityTracker?.computeCurrentVelocity(1000)
+                        val vX = velocityTracker?.xVelocity ?: 0f
+                        val vY = velocityTracker?.yVelocity ?: 0f
+                        val totalVel = hypot(vX.toDouble(), vY.toDouble())
+
+                        // FLICK TO DISMISS
+                        if (isDrag && totalVel > 2500) {
+                            showToast("Closing...")
+                            stopSelf()
+                            return true
+                        }
+
                         if (!isDrag) toggleDrawer()
+                        
+                        velocityTracker?.recycle()
+                        velocityTracker = null
                         return true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        velocityTracker?.recycle()
+                        velocityTracker = null
                     }
                 }
                 return false
