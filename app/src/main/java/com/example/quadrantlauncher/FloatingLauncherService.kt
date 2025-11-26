@@ -58,7 +58,6 @@ class FloatingLauncherService : Service() {
     private var currentDpiSetting = -1
     private var currentFontSize = 16f
     
-    // Settings Variables
     private var killAppOnExecute = true
     private var targetDisplayIndex = 1 
     private var resetTrackpad = false
@@ -839,6 +838,7 @@ class FloatingLauncherService : Service() {
             val intent = Intent(this, IconPickerActivity::class.java)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             
+            // Force to Cover Screen using ActivityOptions
             val metrics = windowManager.maximumWindowMetrics
             val w = 1000
             val h = (metrics.bounds.height() * 0.7).toInt()
@@ -982,6 +982,17 @@ class FloatingLauncherService : Service() {
                         val bounds = rects[i]
                         uiHandler.postDelayed({ launchViaApi(pkg, bounds) }, (i * 150).toLong())
                         uiHandler.postDelayed({ launchViaShell(pkg) }, (i * 150 + 50).toLong())
+                        
+                        // NEW: Fast Move if not killing
+                        if (!killAppOnExecute) {
+                            uiHandler.postDelayed({
+                                Thread { 
+                                    try { shellService?.repositionTask(pkg, bounds.left, bounds.top, bounds.right, bounds.bottom) } catch (e: Exception) {}
+                                }.start()
+                            }, (i * 150 + 150).toLong())
+                        }
+
+                        // Original Backup Move
                         uiHandler.postDelayed({
                             Thread { 
                                 try { shellService?.repositionTask(pkg, bounds.left, bounds.top, bounds.right, bounds.bottom) } catch (e: Exception) {}
