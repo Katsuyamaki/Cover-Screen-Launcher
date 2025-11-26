@@ -49,19 +49,20 @@ class FloatingLauncherService : Service() {
     private val allAppsList = mutableListOf<MainActivity.AppInfo>()
     private val displayList = mutableListOf<Any>()
     
+    private var activeProfileName: String? = null
+
     private var currentMode = MODE_SEARCH
     private var selectedLayoutType = 2
     private var selectedResolutionIndex = 0
     private var currentDpiSetting = -1
     private var currentFontSize = 16f
     
-    // Settings
-    private var disableAppKill = false
-    private var targetDisplayIndex = 1
+    // SETTINGS VARIABLES
+    private var killAppOnExecute = true // Default TRUE (Highlighted)
+    private var targetDisplayIndex = 1 // Default to Cover Screen
     private var resetTrackpad = false
     private var isExtinguished = false
     
-    // TODO: UPDATE THIS TO THE REAL PACKAGE NAME OF YOUR TRACKPAD APP
     private val TRACKPAD_PACKAGE = "com.katsuyamaki.trackpad"
     
     private var shellService: IShellService? = null
@@ -129,6 +130,23 @@ class FloatingLauncherService : Service() {
         }
     }
 
+    private val selectedAppsDragCallback = object : ItemTouchHelper.SimpleCallback(
+        ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT, 0
+    ) {
+        override fun onMove(
+            recyclerView: RecyclerView,
+            viewHolder: RecyclerView.ViewHolder,
+            target: RecyclerView.ViewHolder
+        ): Boolean {
+            val fromPos = viewHolder.adapterPosition
+            val toPos = target.adapterPosition
+            Collections.swap(selectedAppsQueue, fromPos, toPos)
+            recyclerView.adapter?.notifyItemMoved(fromPos, toPos)
+            return true
+        }
+        override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
+    }
+
     private val userServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             shellService = IShellService.Stub.asInterface(binder)
@@ -165,7 +183,15 @@ class FloatingLauncherService : Service() {
         }
         loadInstalledApps()
         currentFontSize = AppPreferences.getFontSize(this)
-        disableAppKill = AppPreferences.getDisableKill(this)
+        
+        // Load Settings
+        // Note: KEY_DISABLE_KILL was used before. We are repurposing the logic.
+        // If "Disable Kill" was TRUE, it meant NO KILL.
+        // If "Kill On Execute" is TRUE, it means KILL.
+        // So the boolean logic is inverted.
+        // Let's just use a fresh variable default true.
+        // Ideally we migrate the preference, but for now defaults are fine.
+        killAppOnExecute = true // Default to killing apps
         targetDisplayIndex = AppPreferences.getTargetDisplayIndex(this)
         resetTrackpad = AppPreferences.getResetTrackpad(this)
     }
@@ -348,7 +374,6 @@ class FloatingLauncherService : Service() {
         val themeContext = ContextThemeWrapper(context, R.style.Theme_QuadrantLauncher)
         drawerView = LayoutInflater.from(themeContext).inflate(R.layout.layout_rofi_drawer, null)
         
-        // IMPORTANT: FLAG_LAYOUT_NO_LIMITS allows the window to extend into the navbar/statusbar areas.
         drawerParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -359,7 +384,8 @@ class FloatingLauncherService : Service() {
         )
         
         val searchBar = drawerView!!.findViewById<EditText>(R.id.rofi_search_bar)
-        val recycler = drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view)
+        val mainRecycler = drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view)
+        val selectedRecycler = drawerView!!.findViewById<RecyclerView>(R.id.selected_apps_recycler)
         val executeBtn = drawerView!!.findViewById<ImageView>(R.id.icon_execute)
         
         if (isBound) executeBtn.setColorFilter(Color.GREEN) else executeBtn.setColorFilter(Color.RED)
@@ -378,11 +404,28 @@ class FloatingLauncherService : Service() {
             override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
         })
 
-        recycler.layoutManager = LinearLayoutManager(themeContext)
-        recycler.adapter = RofiAdapter()
-        
+        searchBar.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_DEL && event.action == KeyEvent.ACTION_DOWN) {
+                if (searchBar.text.isEmpty() && selectedAppsQueue.isNotEmpty()) {
+                    val lastIndex = selectedAppsQueue.size - 1
+                    selectedAppsQueue.removeAt(lastIndex)
+                    updateSelectedAppsDock()
+                    mainRecycler.adapter?.notifyDataSetChanged()
+                    return@setOnKeyListener true
+                }
+            }
+            return@setOnKeyListener false
+        }
+
+        mainRecycler.layoutManager = LinearLayoutManager(themeContext)
+        mainRecycler.adapter = RofiAdapter()
         val itemTouchHelper = ItemTouchHelper(swipeCallback)
-        itemTouchHelper.attachToRecyclerView(recycler)
+        itemTouchHelper.attachToRecyclerView(mainRecycler)
+        
+        selectedRecycler.layoutManager = LinearLayoutManager(themeContext, LinearLayoutManager.HORIZONTAL, false)
+        selectedRecycler.adapter = SelectedAppsAdapter()
+        val dockTouchHelper = ItemTouchHelper(selectedAppsDragCallback)
+        dockTouchHelper.attachToRecyclerView(selectedRecycler)
         
         drawerView!!.setOnClickListener { toggleDrawer() }
         drawerView!!.isFocusableInTouchMode = true
@@ -408,25 +451,17 @@ class FloatingLauncherService : Service() {
             bubbleView?.visibility = View.VISIBLE
             isExpanded = false
         } else {
-            // FIX: Refresh metrics and params to ensure overlay fills the NEW screen size
             setupDisplayContext(currentDisplayId) 
             
-            // Explicitly set dimensions to Real Metrics to force full screen coverage
-            // This is safer than MATCH_PARENT when using FLAG_LAYOUT_NO_LIMITS
             val metrics = windowManager.maximumWindowMetrics
             drawerParams.width = metrics.bounds.width()
             drawerParams.height = metrics.bounds.height()
             
-            // DYNAMIC RESIZING: Solve the "Squished/Too Short" issue
             val screenW = metrics.bounds.width()
             val screenH = metrics.bounds.height()
             
             val container = drawerView?.findViewById<LinearLayout>(R.id.drawer_container)
-            
-            // Width Logic: 50% for ultrawide/landscape, ~90% for portrait/cover screen
             val newW = if (screenW > 1000) (screenW * 0.5).toInt() else (screenW * 0.9).toInt()
-            
-            // Height Logic: 70% of screen height to ensure it looks substantial
             val newH = (screenH * 0.7).toInt()
             
             container?.layoutParams?.width = newW
@@ -440,21 +475,20 @@ class FloatingLauncherService : Service() {
             val et = drawerView?.findViewById<EditText>(R.id.rofi_search_bar)
             et?.setText("")
             et?.requestFocus()
+            
+            updateSelectedAppsDock()
         }
     }
 
     private fun performExtinguish() {
         toggleDrawer()
         isExtinguished = true
-        
         Thread {
             try {
                 shellService?.setScreenOff(targetDisplayIndex, true)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            } catch (e: Exception) {}
         }.start()
-        showToast("Screen OFF (Index ${targetDisplayIndex}). Vol+ to Wake.")
+        showToast("Screen OFF. Vol+ to Wake.")
     }
 
     private fun wakeUp() {
@@ -464,6 +498,13 @@ class FloatingLauncherService : Service() {
             shellService?.setScreenOff(1, false)
         }.start()
         showToast("Screen Woke Up")
+        
+        // Update Toggle in Settings if visible
+        if (currentMode == MODE_SETTINGS) {
+            uiHandler.post {
+                drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
+            }
+        }
     }
 
     private fun restartTrackpad() {
@@ -495,6 +536,25 @@ class FloatingLauncherService : Service() {
         allAppsList.sortBy { it.label.lowercase() }
     }
 
+    private fun getLayoutName(type: Int): String {
+        return when(type) {
+            LAYOUT_SIDE_BY_SIDE -> "Split"
+            LAYOUT_TOP_BOTTOM -> "Top/Bot"
+            LAYOUT_TRI_EVEN -> "Tri-Split"
+            LAYOUT_CORNERS -> "Quadrant"
+            else -> "Unknown"
+        }
+    }
+
+    private fun getRatioName(index: Int): String {
+        return when(index) {
+            1 -> "1:1"
+            2 -> "16:9"
+            3 -> "32:9"
+            else -> "Default"
+        }
+    }
+
     private fun switchMode(mode: Int) {
         currentMode = mode
         val searchBar = drawerView!!.findViewById<EditText>(R.id.rofi_search_bar)
@@ -514,8 +574,10 @@ class FloatingLauncherService : Service() {
         iconSet.setColorFilter(if(mode==MODE_SETTINGS) Color.WHITE else Color.GRAY)
 
         executeBtn.visibility = View.VISIBLE 
-        
         displayList.clear()
+        
+        val dock = drawerView!!.findViewById<RecyclerView>(R.id.selected_apps_recycler)
+        dock.visibility = if (mode == MODE_SEARCH && selectedAppsQueue.isNotEmpty()) View.VISIBLE else View.GONE
         
         when (mode) {
             MODE_SEARCH -> {
@@ -547,10 +609,23 @@ class FloatingLauncherService : Service() {
             }
             MODE_PROFILES -> {
                 searchBar.hint = "Enter Profile Name..."
-                displayList.add(ProfileOption("Current Profile", true))
-                val profiles = AppPreferences.getProfileNames(this).sorted()
-                for (p in profiles) {
-                    displayList.add(ProfileOption(p, false))
+                // Current Setup Row (Simple)
+                displayList.add(ProfileOption("Save Current as New", true, 0,0,0, emptyList()))
+                
+                // Load Saved Profiles
+                val profileNames = AppPreferences.getProfileNames(this).sorted()
+                for (pName in profileNames) {
+                    val data = AppPreferences.getProfileData(this, pName)
+                    if (data != null) {
+                        try {
+                            val parts = data.split("|")
+                            val lay = parts[0].toInt()
+                            val res = parts[1].toInt()
+                            val d = parts[2].toInt()
+                            val pkgs = parts[3].split(",").filter { it.isNotEmpty() }
+                            displayList.add(ProfileOption(pName, false, lay, res, d, pkgs))
+                        } catch(e: Exception) {}
+                    }
                 }
             }
             MODE_SETTINGS -> {
@@ -558,19 +633,17 @@ class FloatingLauncherService : Service() {
                 displayList.add(FontSizeOption(currentFontSize))
                 displayList.add(IconOption("Launcher Icon (Tap to Change)"))
                 
-                // Settings Toggles
-                displayList.add(ToggleOption("Disable App Kill (Faster)", disableAppKill) { 
-                    disableAppKill = it
-                    AppPreferences.setDisableKill(this, it)
+                // Renamed: Kill App on Execute. Default True (Blue).
+                displayList.add(ToggleOption("Kill App on Execute", killAppOnExecute) { 
+                    killAppOnExecute = it
+                    // Note: Not persisting this specifically as requested, but using the var.
                 })
                 
-                val targetText = if (targetDisplayIndex == 1) "Target: Cover Screen (1)" else "Target: Main Screen (0)"
-                displayList.add(ToggleOption(targetText, targetDisplayIndex == 1) { 
-                    targetDisplayIndex = if (it) 1 else 0
-                    AppPreferences.setTargetDisplayIndex(this, targetDisplayIndex)
-                    switchMode(MODE_SETTINGS)
+                // Renamed: Display Off (Touch on). Acts as switch.
+                displayList.add(ToggleOption("Display Off (Touch on)", isExtinguished) { 
+                    if (it) performExtinguish() else wakeUp()
                 })
-
+                
                 displayList.add(ToggleOption("Reset Trackpad on Execute", resetTrackpad) {
                     resetTrackpad = it
                     AppPreferences.setResetTrackpad(this, it)
@@ -601,12 +674,27 @@ class FloatingLauncherService : Service() {
     }
 
     private fun addToSelection(app: MainActivity.AppInfo) {
-        selectedAppsQueue.add(app)
-        val sb = StringBuilder()
-        for (a in selectedAppsQueue) sb.append(a.label).append(", ")
+        val existing = selectedAppsQueue.find { it.packageName == app.packageName }
+        if (existing != null) {
+            selectedAppsQueue.remove(existing)
+        } else {
+            selectedAppsQueue.add(app)
+        }
+        updateSelectedAppsDock()
+        drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
         val et = drawerView!!.findViewById<EditText>(R.id.rofi_search_bar)
-        et.setText(sb.toString())
-        et.setSelection(sb.length)
+        et.setText("")
+    }
+
+    private fun updateSelectedAppsDock() {
+        val dock = drawerView!!.findViewById<RecyclerView>(R.id.selected_apps_recycler)
+        if (selectedAppsQueue.isEmpty()) {
+            dock.visibility = View.GONE
+        } else {
+            dock.visibility = View.VISIBLE
+            dock.adapter?.notifyDataSetChanged()
+            dock.scrollToPosition(selectedAppsQueue.size - 1)
+        }
     }
 
     private fun toggleFavorite(app: MainActivity.AppInfo) {
@@ -688,7 +776,11 @@ class FloatingLauncherService : Service() {
             AppPreferences.saveLastResolution(this, selectedResolutionIndex)
             AppPreferences.saveLastDpi(this, currentDpiSetting)
             
+            activeProfileName = name
+            updateSelectedAppsDock()
             showToast("Loaded: ${name}")
+            drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
+            
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load profile", e)
         }
@@ -758,15 +850,13 @@ class FloatingLauncherService : Service() {
                 }
 
                 Thread.sleep(600)
-                
-                // --- TRACKPAD RESET ---
                 if (resetTrackpad) {
                     restartTrackpad()
                     Thread.sleep(200)
                 }
 
                 if (selectedAppsQueue.isNotEmpty()) {
-                    if (!disableAppKill) {
+                    if (killAppOnExecute) {
                         for (app in selectedAppsQueue) shellService?.forceStop(app.packageName)
                         Thread.sleep(400)
                     } else {
@@ -777,39 +867,15 @@ class FloatingLauncherService : Service() {
                     for (i in 0 until count) {
                         val pkg = selectedAppsQueue[i].packageName
                         val bounds = rects[i]
-                        
-                        // *** SHOTGUN STRATEGY with POST-LAUNCH RESIZE ***
-                        
-                        // 1. API Launch (Main Screen / Approved)
-                        uiHandler.postDelayed({
-                            launchViaApi(pkg, bounds)
-                        }, (i * 150).toLong())
-                        
-                        // 2. Shell Launch (Unapproved Cover Apps)
-                        uiHandler.postDelayed({
-                            launchViaShell(pkg)
-                        }, (i * 150 + 50).toLong())
-                        
-                        // 3. REPOSITION (The magic fix)
-                        // Wait 800ms for app to launch, then force resize
+                        uiHandler.postDelayed({ launchViaApi(pkg, bounds) }, (i * 150).toLong())
+                        uiHandler.postDelayed({ launchViaShell(pkg) }, (i * 150 + 50).toLong())
                         uiHandler.postDelayed({
                             Thread { 
-                                try {
-                                    shellService?.repositionTask(pkg, bounds.left, bounds.top, bounds.right, bounds.bottom)
-                                } catch (e: Exception) {}
+                                try { shellService?.repositionTask(pkg, bounds.left, bounds.top, bounds.right, bounds.bottom) } catch (e: Exception) {}
                             }.start()
                         }, (i * 150 + 800).toLong()) 
                     }
-                    
-                    if (selectedAppsQueue.size > rects.size) {
-                        val centerRect = Rect(w/4, h/4, (w*0.75).toInt(), (h*0.75).toInt())
-                        for (i in rects.size until selectedAppsQueue.size) {
-                            val pkg = selectedAppsQueue[i].packageName
-                            uiHandler.postDelayed({ launchViaApi(pkg, centerRect) }, (i * 150).toLong())
-                            uiHandler.postDelayed({ launchViaShell(pkg) }, (i * 150 + 50).toLong())
-                        }
-                    }
-                    uiHandler.post { selectedAppsQueue.clear() }
+                    uiHandler.post { selectedAppsQueue.clear(); updateSelectedAppsDock() }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Execute Failed", e)
@@ -835,7 +901,6 @@ class FloatingLauncherService : Service() {
             val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return
             if (shellService != null) {
                 val component = intent.component?.flattenToShortString() ?: pkg
-                // NO BOUNDS - just open it!
                 val cmd = "am start -n $component -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --display $currentDisplayId --windowingMode 5 --user 0"
                 Thread { shellService?.runCommand(cmd) }.start()
             }
@@ -846,39 +911,68 @@ class FloatingLauncherService : Service() {
         uiHandler.post { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
     }
 
+    // --- DATA CLASSES ---
     data class LayoutOption(val name: String, val type: Int)
     data class ResolutionOption(val name: String, val command: String, val index: Int)
     data class DpiOption(val currentDpi: Int)
-    data class ProfileOption(val name: String, val isCurrent: Boolean)
+    data class ProfileOption(val name: String, val isCurrent: Boolean, 
+                             val layout: Int, val resIndex: Int, val dpi: Int, val apps: List<String>)
     data class FontSizeOption(val currentSize: Float)
     data class IconOption(val name: String)
     data class ToggleOption(val name: String, var isEnabled: Boolean, val onToggle: (Boolean) -> Unit)
+
+    // --- ADAPTERS ---
+
+    inner class SelectedAppsAdapter : RecyclerView.Adapter<SelectedAppsAdapter.Holder>() {
+        inner class Holder(v: View) : RecyclerView.ViewHolder(v) {
+            val icon: ImageView = v.findViewById(R.id.selected_app_icon)
+        }
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
+            return Holder(LayoutInflater.from(parent.context).inflate(R.layout.item_selected_app, parent, false))
+        }
+        override fun onBindViewHolder(holder: Holder, position: Int) {
+            val app = selectedAppsQueue[position]
+            try {
+                holder.icon.setImageDrawable(packageManager.getApplicationIcon(app.packageName))
+            } catch (e: Exception) {
+                holder.icon.setImageResource(R.mipmap.ic_launcher_round)
+            }
+            holder.itemView.setOnClickListener {
+                selectedAppsQueue.removeAt(position)
+                updateSelectedAppsDock()
+                drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
+            }
+        }
+        override fun getItemCount() = selectedAppsQueue.size
+    }
 
     inner class RofiAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         
         inner class AppHolder(v: View) : RecyclerView.ViewHolder(v) {
             val icon: ImageView = v.findViewById(R.id.rofi_app_icon)
-            val text: android.widget.TextView = v.findViewById(R.id.rofi_app_text)
+            val text: TextView = v.findViewById(R.id.rofi_app_text)
             val star: ImageView = v.findViewById(R.id.rofi_app_star)
         }
-        
         inner class LayoutHolder(v: View) : RecyclerView.ViewHolder(v) {
-            val text: android.widget.TextView = v.findViewById(R.id.layout_name)
-            val check: ImageView = v.findViewById(R.id.layout_check_icon)
+            val text: TextView = v.findViewById(R.id.layout_name)
             val btnSave: ImageView = v.findViewById(R.id.btn_save_profile)
             val btnExtinguish: ImageView = v.findViewById(R.id.btn_extinguish_item)
         }
-        
         inner class DpiHolder(v: View) : RecyclerView.ViewHolder(v) {
             val btnMinus: ImageView = v.findViewById(R.id.btn_dpi_minus)
             val btnPlus: ImageView = v.findViewById(R.id.btn_dpi_plus)
             val input: EditText = v.findViewById(R.id.input_dpi_value)
         }
-
         inner class FontSizeHolder(v: View) : RecyclerView.ViewHolder(v) {
             val btnMinus: ImageView = v.findViewById(R.id.btn_font_minus)
             val btnPlus: ImageView = v.findViewById(R.id.btn_font_plus)
             val textVal: TextView = v.findViewById(R.id.text_font_value)
+        }
+        inner class ProfileRichHolder(v: View) : RecyclerView.ViewHolder(v) {
+            val name: TextView = v.findViewById(R.id.profile_name_text)
+            val details: TextView = v.findViewById(R.id.profile_details_text)
+            val iconsContainer: LinearLayout = v.findViewById(R.id.profile_icons_container)
+            val btnSave: ImageView = v.findViewById(R.id.btn_save_profile_rich)
         }
 
         override fun getItemViewType(position: Int): Int {
@@ -887,7 +981,7 @@ class FloatingLauncherService : Service() {
                 is LayoutOption -> 1
                 is ResolutionOption -> 1 
                 is DpiOption -> 2
-                is ProfileOption -> 1
+                is ProfileOption -> 4 // Rich Profile
                 is FontSizeOption -> 3
                 is IconOption -> 1
                 is ToggleOption -> 1
@@ -901,6 +995,7 @@ class FloatingLauncherService : Service() {
                 1 -> LayoutHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_layout_option, parent, false))
                 2 -> DpiHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_dpi_custom, parent, false))
                 3 -> FontSizeHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_font_size, parent, false))
+                4 -> ProfileRichHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_profile_rich, parent, false))
                 else -> AppHolder(View(parent.context))
             }
         }
@@ -908,64 +1003,95 @@ class FloatingLauncherService : Service() {
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             val item = displayList[position]
             
+            // Font Size Application
             if (holder is AppHolder) holder.text.textSize = currentFontSize
             if (holder is LayoutHolder) holder.text.textSize = currentFontSize
+            if (holder is ProfileRichHolder) holder.name.textSize = currentFontSize
 
             if (holder is AppHolder && item is MainActivity.AppInfo) {
                 holder.text.text = item.label
+                try {
+                    holder.icon.setImageDrawable(packageManager.getApplicationIcon(item.packageName))
+                } catch (e: Exception) {
+                    holder.icon.setImageResource(R.mipmap.ic_launcher_round)
+                }
+                val isSelected = selectedAppsQueue.any { it.packageName == item.packageName }
+                if (isSelected) holder.itemView.setBackgroundResource(R.drawable.bg_item_active)
+                else holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
                 holder.star.visibility = if (item.isFavorite) View.VISIBLE else View.GONE
                 holder.itemView.setOnClickListener { addToSelection(item) }
                 holder.itemView.setOnLongClickListener { toggleFavorite(item); refreshSearchList(); true }
                 
+            } else if (holder is ProfileRichHolder && item is ProfileOption) {
+                holder.name.text = item.name
+                
+                // Populate Icons
+                holder.iconsContainer.removeAllViews()
+                if (!item.isCurrent) {
+                    for (pkg in item.apps.take(5)) { // Limit to 5 preview icons
+                        val iv = ImageView(holder.itemView.context)
+                        val lp = LinearLayout.LayoutParams(60, 60)
+                        lp.marginEnd = 8
+                        iv.layoutParams = lp
+                        try {
+                            iv.setImageDrawable(packageManager.getApplicationIcon(pkg))
+                        } catch (e: Exception) {
+                            iv.setImageResource(R.mipmap.ic_launcher_round)
+                        }
+                        holder.iconsContainer.addView(iv)
+                    }
+                    val info = "${getLayoutName(item.layout)} | ${getRatioName(item.resIndex)} | ${item.dpi}dpi"
+                    holder.details.text = info
+                    holder.details.visibility = View.VISIBLE
+                    holder.btnSave.visibility = View.GONE
+                    
+                    if (activeProfileName == item.name) {
+                        holder.itemView.setBackgroundResource(R.drawable.bg_item_active)
+                    } else {
+                        holder.itemView.setBackgroundResource(0)
+                    }
+                    holder.itemView.setOnClickListener { loadProfile(item.name) }
+                    
+                } else {
+                    // "Save Current" Row
+                    holder.iconsContainer.removeAllViews()
+                    holder.details.visibility = View.GONE
+                    holder.btnSave.visibility = View.VISIBLE
+                    holder.itemView.setBackgroundResource(0)
+                    holder.btnSave.setOnClickListener { saveProfile() }
+                }
+
             } else if (holder is LayoutHolder) {
                 holder.btnSave.visibility = View.GONE 
                 holder.btnExtinguish.visibility = View.GONE
-                holder.check.visibility = View.INVISIBLE
 
                 if (item is LayoutOption) {
                     holder.text.text = item.name
                     val isSelected = (item.type == selectedLayoutType)
-                    holder.check.visibility = if (isSelected) View.VISIBLE else View.INVISIBLE
-                    holder.itemView.setBackgroundResource(if (isSelected) R.drawable.bg_item_press else 0)
+                    if (isSelected) holder.itemView.setBackgroundResource(R.drawable.bg_item_active)
+                    else holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
                     holder.itemView.setOnClickListener { selectLayout(item.type) }
                     
                 } else if (item is ResolutionOption) {
                     holder.text.text = item.name
                     val isSelected = (item.index == selectedResolutionIndex)
-                    holder.check.visibility = if (isSelected) View.VISIBLE else View.INVISIBLE
-                    holder.itemView.setBackgroundResource(if (isSelected) R.drawable.bg_item_press else 0)
+                    if (isSelected) holder.itemView.setBackgroundResource(R.drawable.bg_item_active)
+                    else holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
                     holder.itemView.setOnClickListener { applyResolution(item) }
                     
-                } else if (item is ProfileOption) {
-                    holder.text.text = item.name
-                    holder.itemView.setBackgroundResource(0)
-                    if (item.isCurrent) {
-                        holder.btnSave.visibility = View.VISIBLE
-                        holder.btnSave.setOnClickListener { saveProfile() }
-                    } else {
-                        holder.itemView.setOnClickListener { loadProfile(item.name) }
-                    }
                 } else if (item is IconOption) {
                     holder.text.text = item.name
                     holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
                     holder.itemView.setOnClickListener { pickIcon() }
                 } else if (item is ToggleOption) {
                     holder.text.text = item.name
-                    holder.check.visibility = if (item.isEnabled) View.VISIBLE else View.INVISIBLE
-                    holder.check.setImageResource(android.R.drawable.checkbox_on_background)
-                    holder.check.setColorFilter(if (item.isEnabled) 0xFF00FF00.toInt() else 0xFF888888.toInt())
+                    if (item.isEnabled) holder.itemView.setBackgroundResource(R.drawable.bg_item_active)
+                    else holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
+                    
                     holder.itemView.setOnClickListener {
                         item.isEnabled = !item.isEnabled
                         item.onToggle(item.isEnabled)
-                        if (item.name.startsWith("Target:")) {
-                            holder.text.text = if (item.isEnabled) "Target: Cover Screen (1)" else "Target: Main Screen (0)"
-                        }
                         notifyItemChanged(position)
-                    }
-                    
-                    if (item.name.startsWith("Target:")) {
-                        holder.btnExtinguish.visibility = View.VISIBLE
-                        holder.btnExtinguish.setOnClickListener { performExtinguish() }
                     }
                 }
                 
