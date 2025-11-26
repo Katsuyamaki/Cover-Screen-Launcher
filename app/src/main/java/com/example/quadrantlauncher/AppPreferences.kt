@@ -17,7 +17,7 @@ object AppPreferences {
     private const val KEY_KILL_ON_EXECUTE = "KEY_KILL_ON_EXECUTE"
     private const val KEY_TARGET_DISPLAY_INDEX = "KEY_TARGET_DISPLAY_INDEX"
     private const val KEY_RESET_TRACKPAD = "KEY_RESET_TRACKPAD"
-    private const val KEY_IS_INSTANT_MODE = "KEY_IS_INSTANT_MODE" // Renamed
+    private const val KEY_IS_INSTANT_MODE = "KEY_IS_INSTANT_MODE"
     
     // State Retention
     private const val KEY_LAST_QUEUE = "KEY_LAST_QUEUE"
@@ -112,6 +112,29 @@ object AppPreferences {
         val newNames = HashSet(names)
         newNames.remove(name)
         getPrefs(context).edit().putStringSet(KEY_PROFILES, newNames).remove("PROFILE_$name").apply()
+    }
+
+    fun renameProfile(context: Context, oldName: String, newName: String): Boolean {
+        if (oldName == newName) return false
+        if (newName.isEmpty()) return false
+        
+        val names = getProfileNames(context)
+        if (!names.contains(oldName)) return false
+        
+        val data = getProfileData(context, oldName) ?: return false
+        
+        // Save as new
+        val newNames = HashSet(names)
+        newNames.remove(oldName)
+        newNames.add(newName)
+        getPrefs(context).edit().putStringSet(KEY_PROFILES, newNames).apply()
+        
+        getPrefs(context).edit()
+            .putString("PROFILE_$newName", data)
+            .remove("PROFILE_$oldName")
+            .apply()
+            
+        return true
     }
 
     // --- FONT SIZE ---
