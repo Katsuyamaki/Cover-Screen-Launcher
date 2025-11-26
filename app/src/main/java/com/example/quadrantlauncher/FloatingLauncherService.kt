@@ -976,14 +976,16 @@ class FloatingLauncherService : Service() {
                         Thread.sleep(100)
                     }
                     
-                    val count = Math.min(selectedAppsQueue.size, rects.size)
+                    // CHANGED BACK: Process queue in ORDER (Left->Right maps to TL->TR->BL->BR)
+                    val appsToLaunch = selectedAppsQueue
+                    
+                    val count = Math.min(appsToLaunch.size, rects.size)
                     for (i in 0 until count) {
-                        val pkg = selectedAppsQueue[i].packageName
+                        val pkg = appsToLaunch[i].packageName
                         val bounds = rects[i]
                         uiHandler.postDelayed({ launchViaApi(pkg, bounds) }, (i * 150).toLong())
                         uiHandler.postDelayed({ launchViaShell(pkg) }, (i * 150 + 50).toLong())
                         
-                        // NEW: Fast Move if not killing
                         if (!killAppOnExecute) {
                             uiHandler.postDelayed({
                                 Thread { 
@@ -992,7 +994,6 @@ class FloatingLauncherService : Service() {
                             }, (i * 150 + 150).toLong())
                         }
 
-                        // Original Backup Move
                         uiHandler.postDelayed({
                             Thread { 
                                 try { shellService?.repositionTask(pkg, bounds.left, bounds.top, bounds.right, bounds.bottom) } catch (e: Exception) {}
