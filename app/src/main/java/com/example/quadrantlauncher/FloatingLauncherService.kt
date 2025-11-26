@@ -57,9 +57,8 @@ class FloatingLauncherService : Service() {
     private var currentDpiSetting = -1
     private var currentFontSize = 16f
     
-    // SETTINGS VARIABLES
-    private var killAppOnExecute = true // Default TRUE (Highlighted)
-    private var targetDisplayIndex = 1 // Default to Cover Screen
+    private var killAppOnExecute = true
+    private var targetDisplayIndex = 1 
     private var resetTrackpad = false
     private var isExtinguished = false
     
@@ -98,6 +97,10 @@ class FloatingLauncherService : Service() {
                 }
             } else if (intent?.action == ACTION_UPDATE_ICON) {
                 updateBubbleIcon()
+                // Also refresh list if in Settings mode to update preview
+                if (currentMode == MODE_SETTINGS) {
+                    drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
+                }
             }
         }
     }
@@ -131,7 +134,7 @@ class FloatingLauncherService : Service() {
     }
 
     private val selectedAppsDragCallback = object : ItemTouchHelper.SimpleCallback(
-        ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT, 0
+        ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT, 0 
     ) {
         override fun onMove(
             recyclerView: RecyclerView,
@@ -184,14 +187,7 @@ class FloatingLauncherService : Service() {
         loadInstalledApps()
         currentFontSize = AppPreferences.getFontSize(this)
         
-        // Load Settings
-        // Note: KEY_DISABLE_KILL was used before. We are repurposing the logic.
-        // If "Disable Kill" was TRUE, it meant NO KILL.
-        // If "Kill On Execute" is TRUE, it means KILL.
-        // So the boolean logic is inverted.
-        // Let's just use a fresh variable default true.
-        // Ideally we migrate the preference, but for now defaults are fine.
-        killAppOnExecute = true // Default to killing apps
+        killAppOnExecute = true
         targetDisplayIndex = AppPreferences.getTargetDisplayIndex(this)
         resetTrackpad = AppPreferences.getResetTrackpad(this)
     }
@@ -499,7 +495,6 @@ class FloatingLauncherService : Service() {
         }.start()
         showToast("Screen Woke Up")
         
-        // Update Toggle in Settings if visible
         if (currentMode == MODE_SETTINGS) {
             uiHandler.post {
                 drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
@@ -609,10 +604,8 @@ class FloatingLauncherService : Service() {
             }
             MODE_PROFILES -> {
                 searchBar.hint = "Enter Profile Name..."
-                // Current Setup Row (Simple)
                 displayList.add(ProfileOption("Save Current as New", true, 0,0,0, emptyList()))
                 
-                // Load Saved Profiles
                 val profileNames = AppPreferences.getProfileNames(this).sorted()
                 for (pName in profileNames) {
                     val data = AppPreferences.getProfileData(this, pName)
@@ -633,13 +626,10 @@ class FloatingLauncherService : Service() {
                 displayList.add(FontSizeOption(currentFontSize))
                 displayList.add(IconOption("Launcher Icon (Tap to Change)"))
                 
-                // Renamed: Kill App on Execute. Default True (Blue).
                 displayList.add(ToggleOption("Kill App on Execute", killAppOnExecute) { 
                     killAppOnExecute = it
-                    // Note: Not persisting this specifically as requested, but using the var.
                 })
                 
-                // Renamed: Display Off (Touch on). Acts as switch.
                 displayList.add(ToggleOption("Display Off (Touch on)", isExtinguished) { 
                     if (it) performExtinguish() else wakeUp()
                 })
@@ -734,11 +724,24 @@ class FloatingLauncherService : Service() {
     private fun pickIcon() {
         toggleDrawer()
         try {
+            refreshDisplayId()
             val intent = Intent(this, IconPickerActivity::class.java)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(intent)
+            
+            // Force to Cover Screen using ActivityOptions
+            val metrics = windowManager.maximumWindowMetrics
+            val w = 1000
+            val h = (metrics.bounds.height() * 0.7).toInt()
+            val x = (metrics.bounds.width() - w) / 2
+            val y = (metrics.bounds.height() - h) / 2
+            
+            val options = android.app.ActivityOptions.makeBasic()
+            options.setLaunchDisplayId(currentDisplayId)
+            options.setLaunchBounds(Rect(x, y, x+w, y+h))
+            
+            startActivity(intent, options.toBundle())
         } catch (e: Exception) {
-            showToast("Error: ${e.message}")
+            showToast("Error launching picker: ${e.message}")
         }
     }
 
@@ -974,6 +977,9 @@ class FloatingLauncherService : Service() {
             val iconsContainer: LinearLayout = v.findViewById(R.id.profile_icons_container)
             val btnSave: ImageView = v.findViewById(R.id.btn_save_profile_rich)
         }
+        inner class IconSettingHolder(v: View) : RecyclerView.ViewHolder(v) {
+            val preview: ImageView = v.findViewById(R.id.icon_setting_preview)
+        }
 
         override fun getItemViewType(position: Int): Int {
             return when (displayList[position]) {
@@ -981,9 +987,9 @@ class FloatingLauncherService : Service() {
                 is LayoutOption -> 1
                 is ResolutionOption -> 1 
                 is DpiOption -> 2
-                is ProfileOption -> 4 // Rich Profile
+                is ProfileOption -> 4 
                 is FontSizeOption -> 3
-                is IconOption -> 1
+                is IconOption -> 5 // NEW TYPE
                 is ToggleOption -> 1
                 else -> 0
             }
@@ -996,6 +1002,7 @@ class FloatingLauncherService : Service() {
                 2 -> DpiHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_dpi_custom, parent, false))
                 3 -> FontSizeHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_font_size, parent, false))
                 4 -> ProfileRichHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_profile_rich, parent, false))
+                5 -> IconSettingHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_icon_setting, parent, false))
                 else -> AppHolder(View(parent.context))
             }
         }
@@ -1079,10 +1086,6 @@ class FloatingLauncherService : Service() {
                     else holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
                     holder.itemView.setOnClickListener { applyResolution(item) }
                     
-                } else if (item is IconOption) {
-                    holder.text.text = item.name
-                    holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
-                    holder.itemView.setOnClickListener { pickIcon() }
                 } else if (item is ToggleOption) {
                     holder.text.text = item.name
                     if (item.isEnabled) holder.itemView.setBackgroundResource(R.drawable.bg_item_active)
@@ -1095,6 +1098,24 @@ class FloatingLauncherService : Service() {
                     }
                 }
                 
+            } else if (holder is IconSettingHolder && item is IconOption) {
+                // Update Icon Preview logic
+                try {
+                    val uriStr = AppPreferences.getIconUri(holder.itemView.context)
+                    if (uriStr != null) {
+                        val uri = Uri.parse(uriStr)
+                        val input = contentResolver.openInputStream(uri)
+                        val bitmap = BitmapFactory.decodeStream(input)
+                        input?.close()
+                        holder.preview.setImageBitmap(bitmap)
+                    } else {
+                        holder.preview.setImageResource(R.mipmap.ic_launcher_round)
+                    }
+                } catch(e: Exception) {
+                    holder.preview.setImageResource(R.mipmap.ic_launcher_round)
+                }
+                holder.itemView.setOnClickListener { pickIcon() }
+
             } else if (holder is DpiHolder && item is DpiOption) {
                 holder.input.setText(item.currentDpi.toString())
                 holder.btnMinus.setOnClickListener {
