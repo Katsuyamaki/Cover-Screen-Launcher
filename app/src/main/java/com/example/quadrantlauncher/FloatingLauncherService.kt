@@ -58,10 +58,12 @@ class FloatingLauncherService : Service() {
     private var currentDpiSetting = -1
     private var currentFontSize = 16f
     
+    // Settings Variables
     private var killAppOnExecute = true
     private var targetDisplayIndex = 1 
     private var resetTrackpad = false
     private var isExtinguished = false
+    private var isMoveMode = false 
     
     private val TRACKPAD_PACKAGE = "com.katsuyamaki.trackpad"
     
@@ -187,9 +189,10 @@ class FloatingLauncherService : Service() {
         loadInstalledApps()
         currentFontSize = AppPreferences.getFontSize(this)
         
-        killAppOnExecute = true
+        killAppOnExecute = AppPreferences.getKillOnExecute(this)
         targetDisplayIndex = AppPreferences.getTargetDisplayIndex(this)
         resetTrackpad = AppPreferences.getResetTrackpad(this)
+        isMoveMode = AppPreferences.getMoveMode(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -361,7 +364,6 @@ class FloatingLauncherService : Service() {
                         val vY = velocityTracker?.yVelocity ?: 0f
                         val totalVel = hypot(vX.toDouble(), vY.toDouble())
 
-                        // FLICK TO DISMISS
                         if (isDrag && totalVel > 2500) {
                             showToast("Closing...")
                             stopSelf()
@@ -541,7 +543,39 @@ class FloatingLauncherService : Service() {
             et?.requestFocus()
             
             updateSelectedAppsDock()
+            
+            // MOVE MODE LOGIC
+            if (isMoveMode) {
+                fetchRunningApps()
+            }
         }
+    }
+    
+    private fun fetchRunningApps() {
+        if (shellService == null) return
+        Thread {
+            try {
+                val visiblePackages = shellService!!.getVisiblePackages(currentDisplayId)
+                uiHandler.post {
+                    if (visiblePackages.isNotEmpty()) {
+                        selectedAppsQueue.clear()
+                        for (pkg in visiblePackages) {
+                            val appInfo = allAppsList.find { it.packageName == pkg }
+                            if (appInfo != null) {
+                                selectedAppsQueue.add(appInfo)
+                            }
+                        }
+                        updateSelectedAppsDock()
+                        drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
+                        showToast("Move Mode: Loaded ${visiblePackages.size} apps")
+                    } else {
+                        showToast("Move Mode: No running apps found on Display $currentDisplayId")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error fetching apps", e)
+            }
+        }.start()
     }
 
     private fun performExtinguish() {
@@ -692,14 +726,19 @@ class FloatingLauncherService : Service() {
             MODE_SETTINGS -> {
                 searchBar.hint = "Settings"
                 
-                // New Action Toggle for Display Switching
                 displayList.add(ActionOption("Switch Display (Current $currentDisplayId)") { cycleDisplay() })
                 
                 displayList.add(FontSizeOption(currentFontSize))
                 displayList.add(IconOption("Launcher Icon (Tap to Change)"))
                 
+                displayList.add(ToggleOption("Move Mode (Pre-populate)", isMoveMode) {
+                    isMoveMode = it
+                    AppPreferences.setMoveMode(this, it)
+                })
+                
                 displayList.add(ToggleOption("Kill App on Execute", killAppOnExecute) { 
                     killAppOnExecute = it
+                    AppPreferences.setKillOnExecute(this, it)
                 })
                 
                 displayList.add(ToggleOption("Display Off (Touch on)", isExtinguished) { 
@@ -800,7 +839,6 @@ class FloatingLauncherService : Service() {
             val intent = Intent(this, IconPickerActivity::class.java)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             
-            // Force to Cover Screen using ActivityOptions
             val metrics = windowManager.maximumWindowMetrics
             val w = 1000
             val h = (metrics.bounds.height() * 0.7).toInt()

@@ -5,6 +5,8 @@ import android.os.Build
 import android.util.Log
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.ArrayList
+import java.util.regex.Pattern
 
 class ShellUserService : IShellService.Stub() {
 
@@ -63,27 +65,20 @@ class ShellUserService : IShellService.Stub() {
 
     override fun repositionTask(packageName: String, left: Int, top: Int, right: Int, bottom: Int) {
         try {
-            // 1. Run raw dumpsys without grep (more reliable across android versions/shells)
-            // "dumpsys activity top" lists the top tasks for ALL displays
             val process = Runtime.getRuntime().exec("dumpsys activity top")
             val reader = BufferedReader(InputStreamReader(process.inputStream))
             
             var line: String?
             var targetTaskId = -1
             
-            // 2. Parse the output in Kotlin
-            // Looking for lines like: "TASK com.package id=123 ..."
             while (reader.readLine().also { line = it } != null) {
                 val l = line!!.trim()
-                
-                // Check if this line describes a TASK and belongs to our package
                 if (l.startsWith("TASK") && l.contains(packageName)) {
-                    // Extract ID using Regex
+                    // Robust ID extraction
                     val match = Regex("id=(\\d+)").find(l)
                     if (match != null) {
                         targetTaskId = match.groupValues[1].toInt()
-                        Log.i(TAG, "Found Task ID $targetTaskId for $packageName")
-                        break // Stop after finding the first match
+                        break
                     }
                 }
             }
@@ -91,20 +86,69 @@ class ShellUserService : IShellService.Stub() {
             process.waitFor()
 
             if (targetTaskId != -1) {
-                // 3. Force Window Mode to Freeform (5)
                 Runtime.getRuntime().exec("am task set-windowing-mode $targetTaskId 5").waitFor()
-                
-                // 4. Force Resize
                 val cmd = "am task resize $targetTaskId $left $top $right $bottom"
-                Log.i(TAG, "Executing: $cmd")
                 Runtime.getRuntime().exec(cmd).waitFor()
-                
-            } else {
-                Log.w(TAG, "Task ID not found for package: $packageName")
             }
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to reposition task", e)
         }
+    }
+
+    override fun getVisiblePackages(displayId: Int): List<String> {
+        val packages = ArrayList<String>()
+        try {
+            val process = Runtime.getRuntime().exec("dumpsys activity activities")
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            
+            var line: String?
+            var currentScanningDisplayId = -1 // Start invalid
+            
+            // Regex to capture: u0 com.package.name/
+            // Matches: "u0 com.foo.bar/" or "u10 com.foo.bar/"
+            val recordPattern = Pattern.compile("u\\d+\\s+([a-zA-Z0-9_.]+)/")
+
+            while (reader.readLine().also { line = it } != null) {
+                val l = line!!.trim()
+
+                // 1. Detect Display Headers (e.g., "Display #0 (activities):")
+                if (l.startsWith("Display #")) {
+                    val displayMatch = Regex("Display #(\\d+)").find(l)
+                    if (displayMatch != null) {
+                        currentScanningDisplayId = displayMatch.groupValues[1].toInt()
+                    }
+                    continue
+                }
+
+                // 2. Only parse if we are inside the requested display block
+                if (currentScanningDisplayId == displayId) {
+                    // 3. Look for ActivityRecords
+                    // Standard format: "* Hist #0: ActivityRecord{... u0 com.package/...}"
+                    if (l.contains("ActivityRecord{")) {
+                        val matcher = recordPattern.matcher(l)
+                        if (matcher.find()) {
+                            val pkg = matcher.group(1)
+                            if (pkg != null && !packages.contains(pkg) && isUserApp(pkg)) {
+                                packages.add(pkg)
+                            }
+                        }
+                    }
+                }
+            }
+            reader.close()
+            process.waitFor()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get visible packages", e)
+        }
+        return packages
+    }
+
+    private fun isUserApp(pkg: String): Boolean {
+        if (pkg == "com.android.systemui") return false
+        if (pkg == "com.android.launcher3") return false // Generic
+        if (pkg == "com.sec.android.app.launcher") return false // Samsung OneUI Home
+        if (pkg == "com.example.quadrantlauncher") return false // Self
+        return true
     }
 }
