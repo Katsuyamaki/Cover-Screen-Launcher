@@ -17,7 +17,7 @@ object AppPreferences {
     private const val KEY_KILL_ON_EXECUTE = "KEY_KILL_ON_EXECUTE"
     private const val KEY_TARGET_DISPLAY_INDEX = "KEY_TARGET_DISPLAY_INDEX"
     private const val KEY_RESET_TRACKPAD = "KEY_RESET_TRACKPAD"
-    private const val KEY_IS_MOVE_MODE = "KEY_IS_MOVE_MODE"
+    private const val KEY_IS_INSTANT_MODE = "KEY_IS_INSTANT_MODE" // Renamed
     
     // State Retention
     private const val KEY_LAST_QUEUE = "KEY_LAST_QUEUE"
@@ -160,12 +160,12 @@ object AppPreferences {
         return getPrefs(context).getBoolean(KEY_RESET_TRACKPAD, false)
     }
 
-    fun setMoveMode(context: Context, enable: Boolean) {
-        getPrefs(context).edit().putBoolean(KEY_IS_MOVE_MODE, enable).apply()
+    fun setInstantMode(context: Context, enable: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_IS_INSTANT_MODE, enable).apply()
     }
 
-    fun getMoveMode(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_IS_MOVE_MODE, false)
+    fun getInstantMode(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_IS_INSTANT_MODE, false)
     }
     
     // --- STATE RETENTION ---

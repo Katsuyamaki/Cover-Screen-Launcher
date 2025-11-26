@@ -62,7 +62,7 @@ class FloatingLauncherService : Service() {
     private var targetDisplayIndex = 1 
     private var resetTrackpad = false
     private var isExtinguished = false
-    private var isMoveMode = false 
+    private var isInstantMode = false 
     
     private val TRACKPAD_PACKAGE = "com.katsuyamaki.trackpad"
     private val PACKAGE_BLANK = "internal.blank.spacer"
@@ -140,7 +140,8 @@ class FloatingLauncherService : Service() {
     }
 
     private val selectedAppsDragCallback = object : ItemTouchHelper.SimpleCallback(
-        ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT, 0 
+        ItemTouchHelper.LEFT or ItemTouchHelper.RIGHT, 
+        ItemTouchHelper.UP or ItemTouchHelper.DOWN 
     ) {
         override fun onMove(
             recyclerView: RecyclerView,
@@ -153,7 +154,33 @@ class FloatingLauncherService : Service() {
             recyclerView.adapter?.notifyItemMoved(fromPos, toPos)
             return true
         }
-        override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
+
+        override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
+            val pos = viewHolder.adapterPosition
+            if (pos != RecyclerView.NO_POSITION) {
+                val app = selectedAppsQueue[pos]
+                
+                if (isInstantMode && app.packageName != PACKAGE_BLANK) {
+                    Thread { 
+                        try { shellService?.forceStop(app.packageName) } catch(e: Exception) {}
+                    }.start()
+                    showToast("Killed ${app.label}")
+                }
+                
+                selectedAppsQueue.removeAt(pos)
+                updateSelectedAppsDock()
+                drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
+                
+                if (isInstantMode) applyLayoutImmediate()
+            }
+        }
+
+        override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
+            super.clearView(recyclerView, viewHolder)
+            if (isInstantMode) {
+                applyLayoutImmediate()
+            }
+        }
     }
 
     private val userServiceConnection = object : ServiceConnection {
@@ -196,7 +223,7 @@ class FloatingLauncherService : Service() {
         killAppOnExecute = AppPreferences.getKillOnExecute(this)
         targetDisplayIndex = AppPreferences.getTargetDisplayIndex(this)
         resetTrackpad = AppPreferences.getResetTrackpad(this)
-        isMoveMode = AppPreferences.getMoveMode(this)
+        isInstantMode = AppPreferences.getInstantMode(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -547,8 +574,8 @@ class FloatingLauncherService : Service() {
             
             updateSelectedAppsDock()
             
-            // MOVE MODE LOGIC
-            if (isMoveMode) {
+            // INSTANT MODE LOGIC
+            if (isInstantMode) {
                 fetchRunningApps()
             }
         }
@@ -560,36 +587,24 @@ class FloatingLauncherService : Service() {
             try {
                 val visiblePackages = shellService!!.getVisiblePackages(currentDisplayId)
                 val lastQueue = AppPreferences.getLastQueue(this)
-                
                 uiHandler.post {
                     selectedAppsQueue.clear()
-                    
-                    // 1. Reconstruct from Last Queue (Preserves Blanks and Order)
                     for (pkg in lastQueue) {
-                        if (pkg == PACKAGE_BLANK) {
-                            selectedAppsQueue.add(MainActivity.AppInfo(" (Blank Space)", PACKAGE_BLANK))
-                        } else if (visiblePackages.contains(pkg)) {
-                            // Only add if it is actually still running/visible
+                        if (pkg == PACKAGE_BLANK) selectedAppsQueue.add(MainActivity.AppInfo(" (Blank Space)", PACKAGE_BLANK))
+                        else if (visiblePackages.contains(pkg)) {
                             val appInfo = allAppsList.find { it.packageName == pkg }
-                            if (appInfo != null) {
-                                selectedAppsQueue.add(appInfo)
-                            }
+                            if (appInfo != null) selectedAppsQueue.add(appInfo)
                         }
                     }
-                    
-                    // 2. Append NEW visible apps that weren't in the last queue
                     for (pkg in visiblePackages) {
                         if (!lastQueue.contains(pkg)) {
                             val appInfo = allAppsList.find { it.packageName == pkg }
-                            if (appInfo != null) {
-                                selectedAppsQueue.add(appInfo)
-                            }
+                            if (appInfo != null) selectedAppsQueue.add(appInfo)
                         }
                     }
-                    
                     updateSelectedAppsDock()
                     drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
-                    showToast("Restored ${selectedAppsQueue.size} apps")
+                    showToast("Instant Mode: Active")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching apps", e)
@@ -615,12 +630,7 @@ class FloatingLauncherService : Service() {
             shellService?.setScreenOff(1, false)
         }.start()
         showToast("Screen Woke Up")
-        
-        if (currentMode == MODE_SETTINGS) {
-            uiHandler.post {
-                drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
-            }
-        }
+        if (currentMode == MODE_SETTINGS) drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
     }
 
     private fun restartTrackpad() {
@@ -641,10 +651,7 @@ class FloatingLauncherService : Service() {
         val intent = Intent(Intent.ACTION_MAIN, null).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
         val riList = pm.queryIntentActivities(intent, 0)
         allAppsList.clear()
-        
-        // Insert Blank Item First
         allAppsList.add(MainActivity.AppInfo(" (Blank Space)", PACKAGE_BLANK))
-        
         for (ri in riList) {
             val app = MainActivity.AppInfo(
                 ri.loadLabel(pm).toString(),
@@ -693,7 +700,9 @@ class FloatingLauncherService : Service() {
         iconProf.setColorFilter(if(mode==MODE_PROFILES) Color.WHITE else Color.GRAY)
         iconSet.setColorFilter(if(mode==MODE_SETTINGS) Color.WHITE else Color.GRAY)
 
-        executeBtn.visibility = View.VISIBLE 
+        // Hide Execute Button if Instant Mode is ON
+        executeBtn.visibility = if (isInstantMode) View.GONE else View.VISIBLE
+        
         displayList.clear()
         
         val dock = drawerView!!.findViewById<RecyclerView>(R.id.selected_apps_recycler)
@@ -730,7 +739,6 @@ class FloatingLauncherService : Service() {
             MODE_PROFILES -> {
                 searchBar.hint = "Enter Profile Name..."
                 displayList.add(ProfileOption("Save Current as New", true, 0,0,0, emptyList()))
-                
                 val profileNames = AppPreferences.getProfileNames(this).sorted()
                 for (pName in profileNames) {
                     val data = AppPreferences.getProfileData(this, pName)
@@ -748,26 +756,24 @@ class FloatingLauncherService : Service() {
             }
             MODE_SETTINGS -> {
                 searchBar.hint = "Settings"
-                
                 displayList.add(ActionOption("Switch Display (Current $currentDisplayId)") { cycleDisplay() })
-                
                 displayList.add(FontSizeOption(currentFontSize))
                 displayList.add(IconOption("Launcher Icon (Tap to Change)"))
                 
-                displayList.add(ToggleOption("Move Mode (Pre-populate)", isMoveMode) {
-                    isMoveMode = it
-                    AppPreferences.setMoveMode(this, it)
+                // Instant Mode Toggle
+                displayList.add(ToggleOption("Instant Mode (Live Changes)", isInstantMode) {
+                    isInstantMode = it
+                    AppPreferences.setInstantMode(this, it)
+                    executeBtn.visibility = if (it) View.GONE else View.VISIBLE
                 })
                 
                 displayList.add(ToggleOption("Kill App on Execute", killAppOnExecute) { 
                     killAppOnExecute = it
                     AppPreferences.setKillOnExecute(this, it)
                 })
-                
                 displayList.add(ToggleOption("Display Off (Touch on)", isExtinguished) { 
                     if (it) performExtinguish() else wakeUp()
                 })
-                
                 displayList.add(ToggleOption("Reset Trackpad on Execute", resetTrackpad) {
                     resetTrackpad = it
                     AppPreferences.setResetTrackpad(this, it)
@@ -775,6 +781,53 @@ class FloatingLauncherService : Service() {
             }
         }
         drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
+    }
+
+    // --- INSTANT MODE EXECUTION ---
+    private fun applyLayoutImmediate() {
+        Thread {
+            refreshDisplayId()
+            
+            val pkgs = selectedAppsQueue.map { it.packageName }
+            AppPreferences.saveLastQueue(this, pkgs)
+
+            val targetDim = getTargetDimensions(selectedResolutionIndex)
+            val w = targetDim?.first ?: windowManager.maximumWindowMetrics.bounds.width()
+            val h = targetDim?.second ?: windowManager.maximumWindowMetrics.bounds.height()
+            
+            val rects = mutableListOf<Rect>()
+            when (selectedLayoutType) {
+                LAYOUT_SIDE_BY_SIDE -> { 
+                    rects.add(Rect(0, 0, w/2, h))
+                    rects.add(Rect(w/2, 0, w, h)) 
+                }
+                LAYOUT_TOP_BOTTOM -> { 
+                    rects.add(Rect(0, 0, w, h/2))
+                    rects.add(Rect(0, h/2, w, h))
+                }
+                LAYOUT_TRI_EVEN -> { 
+                    val third = w / 3
+                    rects.add(Rect(0, 0, third, h))
+                    rects.add(Rect(third, 0, third * 2, h))
+                    rects.add(Rect(third * 2, 0, w, h))
+                }
+                LAYOUT_CORNERS -> { 
+                    rects.add(Rect(0, 0, w/2, h/2))
+                    rects.add(Rect(w/2, 0, w, h/2))
+                    rects.add(Rect(0, h/2, w/2, h))
+                    rects.add(Rect(w/2, h/2, w, h))
+                }
+            }
+
+            val count = Math.min(selectedAppsQueue.size, rects.size)
+            for (i in 0 until count) {
+                val pkg = selectedAppsQueue[i].packageName
+                val bounds = rects[i]
+                if (pkg != PACKAGE_BLANK) {
+                    try { shellService?.repositionTask(pkg, bounds.left, bounds.top, bounds.right, bounds.bottom) } catch (e: Exception) {}
+                }
+            }
+        }.start()
     }
 
     private fun refreshSearchList() {
@@ -791,24 +844,19 @@ class FloatingLauncherService : Service() {
         } else {
             allAppsList.filter { it.label.contains(actualQuery, ignoreCase = true) }
         }
-        
-        // SORTING FIX: Blank first, then Favorites, then Label
         val sorted = filtered.sortedWith(
-            compareBy<MainActivity.AppInfo> { it.packageName != PACKAGE_BLANK } // False (0) comes first
+            compareBy<MainActivity.AppInfo> { it.packageName != PACKAGE_BLANK }
             .thenByDescending { it.isFavorite }
             .thenBy { it.label.lowercase() }
         )
-        
         displayList.addAll(sorted)
         drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
     }
 
     private fun addToSelection(app: MainActivity.AppInfo) {
-        // BLANK: Allow duplicates
         if (app.packageName == PACKAGE_BLANK) {
             selectedAppsQueue.add(app)
         } else {
-            // Normal App: Toggle
             val existing = selectedAppsQueue.find { it.packageName == app.packageName }
             if (existing != null) {
                 selectedAppsQueue.remove(existing)
@@ -818,8 +866,22 @@ class FloatingLauncherService : Service() {
         }
         updateSelectedAppsDock()
         drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
+        
         val et = drawerView!!.findViewById<EditText>(R.id.rofi_search_bar)
         et.setText("")
+
+        // NEW: Instant Mode Launch Logic
+        if (isInstantMode) {
+            if (app.packageName != PACKAGE_BLANK) {
+                launchViaApi(app.packageName, null)
+                launchViaShell(app.packageName)
+                
+                uiHandler.postDelayed({ applyLayoutImmediate() }, 200)
+                uiHandler.postDelayed({ applyLayoutImmediate() }, 800)
+            } else {
+                applyLayoutImmediate()
+            }
+        }
     }
 
     private fun updateSelectedAppsDock() {
@@ -842,7 +904,10 @@ class FloatingLauncherService : Service() {
     private fun selectLayout(type: Int) {
         selectedLayoutType = type
         AppPreferences.saveLastLayout(this, type)
-        (drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter as RofiAdapter).notifyDataSetChanged()
+        drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
+        
+        // Trigger Instant
+        if (isInstantMode) applyLayoutImmediate()
     }
 
     private fun applyResolution(opt: ResolutionOption) {
@@ -850,12 +915,28 @@ class FloatingLauncherService : Service() {
             selectedResolutionIndex = opt.index
             AppPreferences.saveLastResolution(this, opt.index)
         }
-        (drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter as RofiAdapter).notifyDataSetChanged()
+        drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
+        
+        // Trigger Instant
+        if (isInstantMode) {
+            Thread {
+                val resCmd = getResolutionCommand(selectedResolutionIndex)
+                shellService?.runCommand(resCmd)
+            }.start()
+        }
     }
     
     private fun selectDpi(value: Int) {
         currentDpiSetting = value.coerceIn(100, 400)
         AppPreferences.saveLastDpi(this, currentDpiSetting)
+        
+        // Trigger Instant
+        if (isInstantMode) {
+            Thread {
+                val dpiCmd = "wm density $currentDpiSetting -d $currentDisplayId"
+                shellService?.runCommand(dpiCmd)
+            }.start()
+        }
     }
     
     private fun changeFontSize(newSize: Float) {
@@ -929,6 +1010,9 @@ class FloatingLauncherService : Service() {
             showToast("Loaded: ${name}")
             drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
             
+            // Trigger Instant if in mode
+            if (isInstantMode) applyLayoutImmediate()
+            
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load profile", e)
         }
@@ -956,7 +1040,6 @@ class FloatingLauncherService : Service() {
         toggleDrawer() 
         refreshDisplayId() 
         
-        // SAVE QUEUE STATE FOR MOVE MODE RESTORATION
         val pkgs = selectedAppsQueue.map { it.packageName }
         AppPreferences.saveLastQueue(this, pkgs)
         
@@ -1056,12 +1139,12 @@ class FloatingLauncherService : Service() {
         drawerView?.findViewById<EditText>(R.id.rofi_search_bar)?.setText("")
     }
 
-    private fun launchViaApi(pkg: String, bounds: Rect) {
+    private fun launchViaApi(pkg: String, bounds: Rect?) {
         try {
             val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             val options = android.app.ActivityOptions.makeBasic()
-            options.setLaunchBounds(bounds)
+            if (bounds != null) options.setLaunchBounds(bounds)
             startActivity(intent, options.toBundle())
         } catch (e: Exception) {}
     }
@@ -1112,10 +1195,22 @@ class FloatingLauncherService : Service() {
                     holder.icon.setImageResource(R.mipmap.ic_launcher_round)
                 }
             }
+            
             holder.itemView.setOnClickListener {
+                val appToRemove = selectedAppsQueue[position]
+                
+                if (isInstantMode && appToRemove.packageName != PACKAGE_BLANK) {
+                    Thread { 
+                        try { shellService?.forceStop(appToRemove.packageName) } catch(e: Exception) {}
+                    }.start()
+                    showToast("Killed ${appToRemove.label}")
+                }
+                
                 selectedAppsQueue.removeAt(position)
                 updateSelectedAppsDock()
                 drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
+                
+                if (isInstantMode) applyLayoutImmediate()
             }
         }
         override fun getItemCount() = selectedAppsQueue.size
@@ -1190,14 +1285,10 @@ class FloatingLauncherService : Service() {
 
             if (holder is AppHolder && item is MainActivity.AppInfo) {
                 holder.text.text = item.label
-                if (item.packageName == PACKAGE_BLANK) {
-                    holder.icon.setImageResource(R.drawable.ic_box_outline)
-                } else {
-                    try {
-                        holder.icon.setImageDrawable(packageManager.getApplicationIcon(item.packageName))
-                    } catch (e: Exception) {
-                        holder.icon.setImageResource(R.mipmap.ic_launcher_round)
-                    }
+                try {
+                    holder.icon.setImageDrawable(packageManager.getApplicationIcon(item.packageName))
+                } catch (e: Exception) {
+                    holder.icon.setImageResource(R.mipmap.ic_launcher_round)
                 }
                 val isSelected = selectedAppsQueue.any { it.packageName == item.packageName }
                 if (isSelected) holder.itemView.setBackgroundResource(R.drawable.bg_item_active)
@@ -1216,14 +1307,10 @@ class FloatingLauncherService : Service() {
                         val lp = LinearLayout.LayoutParams(60, 60)
                         lp.marginEnd = 8
                         iv.layoutParams = lp
-                        if (pkg == PACKAGE_BLANK) {
-                            iv.setImageResource(R.drawable.ic_box_outline)
-                        } else {
-                            try {
-                                iv.setImageDrawable(packageManager.getApplicationIcon(pkg))
-                            } catch (e: Exception) {
-                                iv.setImageResource(R.mipmap.ic_launcher_round)
-                            }
+                        try {
+                            iv.setImageDrawable(packageManager.getApplicationIcon(pkg))
+                        } catch (e: Exception) {
+                            iv.setImageResource(R.mipmap.ic_launcher_round)
                         }
                         holder.iconsContainer.addView(iv)
                     }
