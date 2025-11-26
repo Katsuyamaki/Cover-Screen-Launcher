@@ -22,6 +22,7 @@ import android.util.Log
 import android.view.*
 import android.widget.EditText
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.Toast
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
@@ -347,11 +348,13 @@ class FloatingLauncherService : Service() {
         val themeContext = ContextThemeWrapper(context, R.style.Theme_QuadrantLauncher)
         drawerView = LayoutInflater.from(themeContext).inflate(R.layout.layout_rofi_drawer, null)
         
+        // IMPORTANT: FLAG_LAYOUT_NO_LIMITS allows the window to extend into the navbar/statusbar areas.
         drawerParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            0, 
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or 
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         )
         
@@ -405,6 +408,31 @@ class FloatingLauncherService : Service() {
             bubbleView?.visibility = View.VISIBLE
             isExpanded = false
         } else {
+            // FIX: Refresh metrics and params to ensure overlay fills the NEW screen size
+            setupDisplayContext(currentDisplayId) 
+            
+            // Explicitly set dimensions to Real Metrics to force full screen coverage
+            // This is safer than MATCH_PARENT when using FLAG_LAYOUT_NO_LIMITS
+            val metrics = windowManager.maximumWindowMetrics
+            drawerParams.width = metrics.bounds.width()
+            drawerParams.height = metrics.bounds.height()
+            
+            // DYNAMIC RESIZING: Solve the "Squished/Too Short" issue
+            val screenW = metrics.bounds.width()
+            val screenH = metrics.bounds.height()
+            
+            val container = drawerView?.findViewById<LinearLayout>(R.id.drawer_container)
+            
+            // Width Logic: 50% for ultrawide/landscape, ~90% for portrait/cover screen
+            val newW = if (screenW > 1000) (screenW * 0.5).toInt() else (screenW * 0.9).toInt()
+            
+            // Height Logic: 70% of screen height to ensure it looks substantial
+            val newH = (screenH * 0.7).toInt()
+            
+            container?.layoutParams?.width = newW
+            container?.layoutParams?.height = newH
+            container?.requestLayout()
+
             try { windowManager.addView(drawerView, drawerParams) } catch(e: Exception) {}
             bubbleView?.visibility = View.GONE
             isExpanded = true
