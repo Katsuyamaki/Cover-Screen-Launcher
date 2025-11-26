@@ -13,10 +13,11 @@ object AppPreferences {
     private const val KEY_FONT_SIZE = "KEY_FONT_SIZE"
     private const val KEY_ICON_URI = "KEY_ICON_URI"
     
-    // New Keys
-    private const val KEY_DISABLE_KILL = "KEY_DISABLE_KILL"
+    // Settings
+    private const val KEY_KILL_ON_EXECUTE = "KEY_KILL_ON_EXECUTE"
     private const val KEY_TARGET_DISPLAY_INDEX = "KEY_TARGET_DISPLAY_INDEX"
     private const val KEY_RESET_TRACKPAD = "KEY_RESET_TRACKPAD"
+    private const val KEY_IS_MOVE_MODE = "KEY_IS_MOVE_MODE"
 
     private fun getPrefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -130,14 +131,14 @@ object AppPreferences {
         return getPrefs(context).getString(KEY_ICON_URI, null)
     }
 
-    // --- NEW SETTINGS ---
+    // --- SETTINGS ---
     
-    fun setDisableKill(context: Context, disable: Boolean) {
-        getPrefs(context).edit().putBoolean(KEY_DISABLE_KILL, disable).apply()
+    fun setKillOnExecute(context: Context, kill: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_KILL_ON_EXECUTE, kill).apply()
     }
 
-    fun getDisableKill(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_DISABLE_KILL, false)
+    fun getKillOnExecute(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_KILL_ON_EXECUTE, true)
     }
 
     fun setTargetDisplayIndex(context: Context, index: Int) {
@@ -154,5 +155,13 @@ object AppPreferences {
 
     fun getResetTrackpad(context: Context): Boolean {
         return getPrefs(context).getBoolean(KEY_RESET_TRACKPAD, false)
+    }
+
+    fun setMoveMode(context: Context, enable: Boolean) {
+        getPrefs(context).edit().putBoolean(KEY_IS_MOVE_MODE, enable).apply()
+    }
+
+    fun getMoveMode(context: Context): Boolean {
+        return getPrefs(context).getBoolean(KEY_IS_MOVE_MODE, false)
     }
 }
