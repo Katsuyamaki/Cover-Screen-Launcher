@@ -97,7 +97,6 @@ class FloatingLauncherService : Service() {
                 }
             } else if (intent?.action == ACTION_UPDATE_ICON) {
                 updateBubbleIcon()
-                // Also refresh list if in Settings mode to update preview
                 if (currentMode == MODE_SETTINGS) {
                     drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
                 }
@@ -230,6 +229,54 @@ class FloatingLauncherService : Service() {
     private fun refreshDisplayId() {
         val id = displayContext?.display?.displayId ?: Display.DEFAULT_DISPLAY
         currentDisplayId = id
+    }
+
+    private fun cycleDisplay() {
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        
+        // FORCE TOGGLE: If 0 -> 1. If 1 -> 0. 
+        // This overrides the "list" logic because Main Screen often hides Cover Screen from the list.
+        var targetId = if (currentDisplayId == 0) 1 else 0
+        var targetDisplay = dm.getDisplay(targetId)
+        
+        if (targetDisplay == null) {
+            // Fallback: If the preferred toggle target isn't found, cycle through what IS available.
+            val displays = dm.displays
+            val currentIdx = displays.indexOfFirst { it.displayId == currentDisplayId }
+            val nextIdx = if (currentIdx == -1) 0 else (currentIdx + 1) % displays.size
+            targetDisplay = displays[nextIdx]
+        }
+
+        if (targetDisplay == null) {
+            showToast("Error: Target display unavailable.")
+            return
+        }
+
+        val newId = targetDisplay.displayId
+        
+        // 1. Cleanup Old Views
+        try {
+            if (bubbleView != null && bubbleView!!.isAttachedToWindow) windowManager.removeView(bubbleView)
+            if (drawerView != null && drawerView!!.isAttachedToWindow) windowManager.removeView(drawerView)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error removing views", e)
+        }
+
+        // 2. Update Context
+        currentDisplayId = newId
+        setupDisplayContext(currentDisplayId)
+
+        // 3. Sync Settings
+        targetDisplayIndex = currentDisplayId
+        AppPreferences.setTargetDisplayIndex(this, targetDisplayIndex)
+
+        // 4. Rebuild UI
+        setupBubble()
+        setupDrawer()
+        updateBubbleIcon() // Explicitly restore the icon
+        
+        isExpanded = false
+        showToast("Switched to Display $currentDisplayId")
     }
 
     private fun startForegroundService() {
@@ -484,7 +531,7 @@ class FloatingLauncherService : Service() {
                 shellService?.setScreenOff(targetDisplayIndex, true)
             } catch (e: Exception) {}
         }.start()
-        showToast("Screen OFF. Vol+ to Wake.")
+        showToast("Screen OFF (Index ${targetDisplayIndex}). Vol+ to Wake.")
     }
 
     private fun wakeUp() {
@@ -623,6 +670,10 @@ class FloatingLauncherService : Service() {
             }
             MODE_SETTINGS -> {
                 searchBar.hint = "Settings"
+                
+                // New Action Toggle for Display Switching
+                displayList.add(ActionOption("Switch Display (Current $currentDisplayId)") { cycleDisplay() })
+                
                 displayList.add(FontSizeOption(currentFontSize))
                 displayList.add(IconOption("Launcher Icon (Tap to Change)"))
                 
@@ -922,6 +973,7 @@ class FloatingLauncherService : Service() {
                              val layout: Int, val resIndex: Int, val dpi: Int, val apps: List<String>)
     data class FontSizeOption(val currentSize: Float)
     data class IconOption(val name: String)
+    data class ActionOption(val name: String, val action: () -> Unit) // NEW
     data class ToggleOption(val name: String, var isEnabled: Boolean, val onToggle: (Boolean) -> Unit)
 
     // --- ADAPTERS ---
@@ -989,8 +1041,9 @@ class FloatingLauncherService : Service() {
                 is DpiOption -> 2
                 is ProfileOption -> 4 
                 is FontSizeOption -> 3
-                is IconOption -> 5 // NEW TYPE
+                is IconOption -> 5 
                 is ToggleOption -> 1
+                is ActionOption -> 6 // NEW TYPE ID
                 else -> 0
             }
         }
@@ -1003,6 +1056,7 @@ class FloatingLauncherService : Service() {
                 3 -> FontSizeHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_font_size, parent, false))
                 4 -> ProfileRichHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_profile_rich, parent, false))
                 5 -> IconSettingHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_icon_setting, parent, false))
+                6 -> LayoutHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_layout_option, parent, false)) // Reuse LayoutOption UI
                 else -> AppHolder(View(parent.context))
             }
         }
@@ -1010,7 +1064,6 @@ class FloatingLauncherService : Service() {
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             val item = displayList[position]
             
-            // Font Size Application
             if (holder is AppHolder) holder.text.textSize = currentFontSize
             if (holder is LayoutHolder) holder.text.textSize = currentFontSize
             if (holder is ProfileRichHolder) holder.name.textSize = currentFontSize
@@ -1032,10 +1085,9 @@ class FloatingLauncherService : Service() {
             } else if (holder is ProfileRichHolder && item is ProfileOption) {
                 holder.name.text = item.name
                 
-                // Populate Icons
                 holder.iconsContainer.removeAllViews()
                 if (!item.isCurrent) {
-                    for (pkg in item.apps.take(5)) { // Limit to 5 preview icons
+                    for (pkg in item.apps.take(5)) { 
                         val iv = ImageView(holder.itemView.context)
                         val lp = LinearLayout.LayoutParams(60, 60)
                         lp.marginEnd = 8
@@ -1060,7 +1112,6 @@ class FloatingLauncherService : Service() {
                     holder.itemView.setOnClickListener { loadProfile(item.name) }
                     
                 } else {
-                    // "Save Current" Row
                     holder.iconsContainer.removeAllViews()
                     holder.details.visibility = View.GONE
                     holder.btnSave.visibility = View.VISIBLE
@@ -1086,6 +1137,10 @@ class FloatingLauncherService : Service() {
                     else holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
                     holder.itemView.setOnClickListener { applyResolution(item) }
                     
+                } else if (item is IconOption) {
+                    holder.text.text = item.name
+                    holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
+                    holder.itemView.setOnClickListener { pickIcon() }
                 } else if (item is ToggleOption) {
                     holder.text.text = item.name
                     if (item.isEnabled) holder.itemView.setBackgroundResource(R.drawable.bg_item_active)
@@ -1096,10 +1151,13 @@ class FloatingLauncherService : Service() {
                         item.onToggle(item.isEnabled)
                         notifyItemChanged(position)
                     }
+                } else if (item is ActionOption) {
+                    holder.text.text = item.name
+                    holder.itemView.setBackgroundResource(R.drawable.bg_item_press)
+                    holder.itemView.setOnClickListener { item.action() }
                 }
                 
             } else if (holder is IconSettingHolder && item is IconOption) {
-                // Update Icon Preview logic
                 try {
                     val uriStr = AppPreferences.getIconUri(holder.itemView.context)
                     if (uriStr != null) {
