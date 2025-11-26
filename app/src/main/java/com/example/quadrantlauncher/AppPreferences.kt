@@ -18,6 +18,9 @@ object AppPreferences {
     private const val KEY_TARGET_DISPLAY_INDEX = "KEY_TARGET_DISPLAY_INDEX"
     private const val KEY_RESET_TRACKPAD = "KEY_RESET_TRACKPAD"
     private const val KEY_IS_MOVE_MODE = "KEY_IS_MOVE_MODE"
+    
+    // State Retention
+    private const val KEY_LAST_QUEUE = "KEY_LAST_QUEUE"
 
     private fun getPrefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -163,5 +166,17 @@ object AppPreferences {
 
     fun getMoveMode(context: Context): Boolean {
         return getPrefs(context).getBoolean(KEY_IS_MOVE_MODE, false)
+    }
+    
+    // --- STATE RETENTION ---
+    fun saveLastQueue(context: Context, apps: List<String>) {
+        val str = apps.joinToString(",")
+        getPrefs(context).edit().putString(KEY_LAST_QUEUE, str).apply()
+    }
+    
+    fun getLastQueue(context: Context): List<String> {
+        val str = getPrefs(context).getString(KEY_LAST_QUEUE, "") ?: ""
+        if (str.isEmpty()) return emptyList()
+        return str.split(",").filter { it.isNotEmpty() }
     }
 }

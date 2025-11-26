@@ -65,6 +65,7 @@ class FloatingLauncherService : Service() {
     private var isMoveMode = false 
     
     private val TRACKPAD_PACKAGE = "com.katsuyamaki.trackpad"
+    private val PACKAGE_BLANK = "internal.blank.spacer"
     
     private var shellService: IShellService? = null
     private var isBound = false
@@ -127,6 +128,10 @@ class FloatingLauncherService : Service() {
 
             if (currentMode == MODE_SEARCH) {
                 val item = displayList.getOrNull(pos) as? MainActivity.AppInfo ?: return
+                if (item.packageName == PACKAGE_BLANK) {
+                    (drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter as RofiAdapter).notifyItemChanged(pos)
+                    return
+                }
                 if (direction == ItemTouchHelper.LEFT && !item.isFavorite) toggleFavorite(item)
                 else if (direction == ItemTouchHelper.RIGHT && item.isFavorite) toggleFavorite(item)
                 refreshSearchList()
@@ -236,7 +241,6 @@ class FloatingLauncherService : Service() {
 
     private fun cycleDisplay() {
         val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        
         var targetId = if (currentDisplayId == 0) 1 else 0
         var targetDisplay = dm.getDisplay(targetId)
         
@@ -555,21 +559,37 @@ class FloatingLauncherService : Service() {
         Thread {
             try {
                 val visiblePackages = shellService!!.getVisiblePackages(currentDisplayId)
+                val lastQueue = AppPreferences.getLastQueue(this)
+                
                 uiHandler.post {
-                    if (visiblePackages.isNotEmpty()) {
-                        selectedAppsQueue.clear()
-                        for (pkg in visiblePackages) {
+                    selectedAppsQueue.clear()
+                    
+                    // 1. Reconstruct from Last Queue (Preserves Blanks and Order)
+                    for (pkg in lastQueue) {
+                        if (pkg == PACKAGE_BLANK) {
+                            selectedAppsQueue.add(MainActivity.AppInfo(" (Blank Space)", PACKAGE_BLANK))
+                        } else if (visiblePackages.contains(pkg)) {
+                            // Only add if it is actually still running/visible
                             val appInfo = allAppsList.find { it.packageName == pkg }
                             if (appInfo != null) {
                                 selectedAppsQueue.add(appInfo)
                             }
                         }
-                        updateSelectedAppsDock()
-                        drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
-                        showToast("Move Mode: Loaded ${visiblePackages.size} apps")
-                    } else {
-                        showToast("Move Mode: No running apps found on Display $currentDisplayId")
                     }
+                    
+                    // 2. Append NEW visible apps that weren't in the last queue
+                    for (pkg in visiblePackages) {
+                        if (!lastQueue.contains(pkg)) {
+                            val appInfo = allAppsList.find { it.packageName == pkg }
+                            if (appInfo != null) {
+                                selectedAppsQueue.add(appInfo)
+                            }
+                        }
+                    }
+                    
+                    updateSelectedAppsDock()
+                    drawerView?.findViewById<RecyclerView>(R.id.rofi_recycler_view)?.adapter?.notifyDataSetChanged()
+                    showToast("Restored ${selectedAppsQueue.size} apps")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching apps", e)
@@ -621,6 +641,10 @@ class FloatingLauncherService : Service() {
         val intent = Intent(Intent.ACTION_MAIN, null).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
         val riList = pm.queryIntentActivities(intent, 0)
         allAppsList.clear()
+        
+        // Insert Blank Item First
+        allAppsList.add(MainActivity.AppInfo(" (Blank Space)", PACKAGE_BLANK))
+        
         for (ri in riList) {
             val app = MainActivity.AppInfo(
                 ri.loadLabel(pm).toString(),
@@ -767,18 +791,30 @@ class FloatingLauncherService : Service() {
         } else {
             allAppsList.filter { it.label.contains(actualQuery, ignoreCase = true) }
         }
-        val sorted = filtered.sortedWith(compareByDescending<MainActivity.AppInfo> { it.isFavorite }
-            .thenBy { it.label.lowercase() })
+        
+        // SORTING FIX: Blank first, then Favorites, then Label
+        val sorted = filtered.sortedWith(
+            compareBy<MainActivity.AppInfo> { it.packageName != PACKAGE_BLANK } // False (0) comes first
+            .thenByDescending { it.isFavorite }
+            .thenBy { it.label.lowercase() }
+        )
+        
         displayList.addAll(sorted)
         drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
     }
 
     private fun addToSelection(app: MainActivity.AppInfo) {
-        val existing = selectedAppsQueue.find { it.packageName == app.packageName }
-        if (existing != null) {
-            selectedAppsQueue.remove(existing)
-        } else {
+        // BLANK: Allow duplicates
+        if (app.packageName == PACKAGE_BLANK) {
             selectedAppsQueue.add(app)
+        } else {
+            // Normal App: Toggle
+            val existing = selectedAppsQueue.find { it.packageName == app.packageName }
+            if (existing != null) {
+                selectedAppsQueue.remove(existing)
+            } else {
+                selectedAppsQueue.add(app)
+            }
         }
         updateSelectedAppsDock()
         drawerView!!.findViewById<RecyclerView>(R.id.rofi_recycler_view).adapter?.notifyDataSetChanged()
@@ -838,7 +874,6 @@ class FloatingLauncherService : Service() {
             val intent = Intent(this, IconPickerActivity::class.java)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             
-            // Force to Cover Screen using ActivityOptions
             val metrics = windowManager.maximumWindowMetrics
             val w = 1000
             val h = (metrics.bounds.height() * 0.7).toInt()
@@ -921,6 +956,10 @@ class FloatingLauncherService : Service() {
         toggleDrawer() 
         refreshDisplayId() 
         
+        // SAVE QUEUE STATE FOR MOVE MODE RESTORATION
+        val pkgs = selectedAppsQueue.map { it.packageName }
+        AppPreferences.saveLastQueue(this, pkgs)
+        
         val targetDim = getTargetDimensions(selectedResolutionIndex)
         val w = targetDim?.first ?: windowManager.maximumWindowMetrics.bounds.width()
         val h = targetDim?.second ?: windowManager.maximumWindowMetrics.bounds.height()
@@ -970,19 +1009,25 @@ class FloatingLauncherService : Service() {
 
                 if (selectedAppsQueue.isNotEmpty()) {
                     if (killAppOnExecute) {
-                        for (app in selectedAppsQueue) shellService?.forceStop(app.packageName)
+                        for (app in selectedAppsQueue) {
+                            if (app.packageName != PACKAGE_BLANK) {
+                                shellService?.forceStop(app.packageName)
+                            }
+                        }
                         Thread.sleep(400)
                     } else {
                         Thread.sleep(100)
                     }
                     
-                    // CHANGED BACK: Process queue in ORDER (Left->Right maps to TL->TR->BL->BR)
                     val appsToLaunch = selectedAppsQueue
                     
                     val count = Math.min(appsToLaunch.size, rects.size)
                     for (i in 0 until count) {
                         val pkg = appsToLaunch[i].packageName
                         val bounds = rects[i]
+                        
+                        if (pkg == PACKAGE_BLANK) continue 
+                        
                         uiHandler.postDelayed({ launchViaApi(pkg, bounds) }, (i * 150).toLong())
                         uiHandler.postDelayed({ launchViaShell(pkg) }, (i * 150 + 50).toLong())
                         
@@ -1058,10 +1103,14 @@ class FloatingLauncherService : Service() {
         }
         override fun onBindViewHolder(holder: Holder, position: Int) {
             val app = selectedAppsQueue[position]
-            try {
-                holder.icon.setImageDrawable(packageManager.getApplicationIcon(app.packageName))
-            } catch (e: Exception) {
-                holder.icon.setImageResource(R.mipmap.ic_launcher_round)
+            if (app.packageName == PACKAGE_BLANK) {
+                holder.icon.setImageResource(R.drawable.ic_box_outline)
+            } else {
+                try {
+                    holder.icon.setImageDrawable(packageManager.getApplicationIcon(app.packageName))
+                } catch (e: Exception) {
+                    holder.icon.setImageResource(R.mipmap.ic_launcher_round)
+                }
             }
             holder.itemView.setOnClickListener {
                 selectedAppsQueue.removeAt(position)
@@ -1141,10 +1190,14 @@ class FloatingLauncherService : Service() {
 
             if (holder is AppHolder && item is MainActivity.AppInfo) {
                 holder.text.text = item.label
-                try {
-                    holder.icon.setImageDrawable(packageManager.getApplicationIcon(item.packageName))
-                } catch (e: Exception) {
-                    holder.icon.setImageResource(R.mipmap.ic_launcher_round)
+                if (item.packageName == PACKAGE_BLANK) {
+                    holder.icon.setImageResource(R.drawable.ic_box_outline)
+                } else {
+                    try {
+                        holder.icon.setImageDrawable(packageManager.getApplicationIcon(item.packageName))
+                    } catch (e: Exception) {
+                        holder.icon.setImageResource(R.mipmap.ic_launcher_round)
+                    }
                 }
                 val isSelected = selectedAppsQueue.any { it.packageName == item.packageName }
                 if (isSelected) holder.itemView.setBackgroundResource(R.drawable.bg_item_active)
@@ -1163,10 +1216,14 @@ class FloatingLauncherService : Service() {
                         val lp = LinearLayout.LayoutParams(60, 60)
                         lp.marginEnd = 8
                         iv.layoutParams = lp
-                        try {
-                            iv.setImageDrawable(packageManager.getApplicationIcon(pkg))
-                        } catch (e: Exception) {
-                            iv.setImageResource(R.mipmap.ic_launcher_round)
+                        if (pkg == PACKAGE_BLANK) {
+                            iv.setImageResource(R.drawable.ic_box_outline)
+                        } else {
+                            try {
+                                iv.setImageDrawable(packageManager.getApplicationIcon(pkg))
+                            } catch (e: Exception) {
+                                iv.setImageResource(R.mipmap.ic_launcher_round)
+                            }
                         }
                         holder.iconsContainer.addView(iv)
                     }
