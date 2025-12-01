@@ -95,7 +95,4 @@ Pull requests are welcome!
 * **Architecture:** Kotlin, Android Service, AIDL (for Shizuku IPC).
 * **Key Files:** `FloatingLauncherService.kt` (Logic), `ShellUserService.kt` (Shizuku Commands).
 
-## 📄 License
-
-[MIT License](LICENSE)
 
